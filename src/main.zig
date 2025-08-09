@@ -15,15 +15,20 @@ const Node = struct {
     end: usize,
     children: ?NodeList = null, // null here means a leaf node
 
-    fn print(self: *const Node, i: u32) void {
+    fn print(self: *const Node, data: []const u8, i: u32) void {
         //if (self.name[0] == '_') {
         //    return;
         //}
         indent(i);
         std.debug.print("node name={s} start={d} end={d}\n", .{ self.name, self.start, self.end });
+        indent(i);
+        std.debug.print("value={s}\n", .{data[self.start..self.end]});
         if (self.children) |children| {
             for (children.items) |c| {
-                c.print(i + 2);
+                //if (c.name[0] == '_') {
+                //    continue;
+                //}
+                c.print(data, i + 2);
             }
         }
     }
@@ -49,7 +54,8 @@ fn compile(needle: []const u8) ?*regex.pcre2_code_8 {
 }
 
 /// Takes in a compiled regexp pattern from `compile` and a string of
-/// test which is the haystack and returns either the length of the left-anchored match if found, or null if no match was found.
+/// test which is the haystack and returns either the length of the
+/// left-anchored match if found, or null if no match was found.
 fn find(regexp: *regex.pcre2_code_8, haystack: []const u8) ?usize {
     if (haystack.len == 0) {
         return null;
@@ -118,7 +124,7 @@ const Lookahead = struct {
     child: *const Expression,
 };
 
-const GrammarError = error{InvalidRegex};
+const GrammarError = error{ InvalidRegex, DuplicateLabel };
 
 fn indent(level: u32) void {
     for (0..level) |_| {
@@ -131,7 +137,7 @@ const Expression = union(enum) {
     literal: Literal,
     sequence: Sequence,
     quantity: Quantity,
-    choice: Choice,
+`    choice: Choice,
     lookahead: Lookahead,
 
     fn print(self: *const Expression, i: u32) void {
@@ -141,7 +147,7 @@ const Expression = union(enum) {
                 std.debug.print("regex name={s}\n", .{r.name});
             },
             .literal => |l| {
-                std.debug.print("literal name={s}\n", .{l.name});
+                std.debug.print("literal name={s} value={s}\n", .{ l.name, l.value });
             },
             .sequence => |s| {
                 std.debug.print("seq name={s}\n", .{s.name});
@@ -250,27 +256,205 @@ const Expression = union(enum) {
     }
 };
 
+const ReferenceTable = std.StringHashMap(Expression);
 const Grammar = struct {
     root: Expression,
-    references: std.StringHashMap(Expression),
+    references: ReferenceTable,
     allocator: Allocator,
 
     pub fn init(allocator: Allocator) Grammar {
         return Grammar{
+            // This needs to be filled for parse() to actually do
+            // anything, we'll set it with a manually constructed
+            // expression for a first bootstrap
             .root = Expression{ .literal = Literal{ .name = "_", .value = "" } },
             .allocator = allocator,
-            .references = std.StringHashMap(Expression).init(allocator),
+            .references = ReferenceTable.init(allocator),
         };
     }
 
+    // Parse pre-loaded data according to the grammar
     pub fn parse(self: *Grammar, data: []const u8) !?Node {
         var pos: usize = 0;
-        const n = try self.root.parse(self.allocator, data, &pos);
+        const n = try self.parseInner(&self.root, data, &pos);
         if (pos != data.len) {
             std.debug.print("did not reach end\n", .{});
             return null;
         }
         return n;
+    }
+
+    // Inside Grammar to have access to the reference table, but
+    // ideally a reference for any visitor implementations
+    const BootStrapVisitor = struct {
+        const BootStrapVisitorSignature = *const fn (self: *BootStrapVisitor, data: []const u8, node: *const Node) anyerror!?Expression;
+        visitorTable: std.StringHashMap(BootStrapVisitorSignature),
+        allocator: Allocator,
+
+        fn visit(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?Expression {
+            try self.visitorTable.put("regex", &BootStrapVisitor.visit_regex);
+            try self.visitorTable.put("rule", &BootStrapVisitor.visit_rule);
+            try self.visitorTable.put("label_regex", &BootStrapVisitor.visit_label_regex);
+            std.debug.assert(std.mem.eql(u8, node.name, "rules"));
+            var rules = ExpressionList.init(self.allocator);
+            for (node.children.?.items) |child| {
+                if (try self.visit_generic(data, &child)) |result| {
+                    std.debug.print("full rule", .{});
+                    try rules.append(result);
+                }
+            }
+            return self.visit_generic(data, node);
+        }
+
+        fn visit_generic(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?Expression {
+            // Skip over anything starting with _ as convention
+            if (node.name[0] == '_') {
+                return null;
+            }
+            std.debug.print("visiting {s}\n", .{node.name});
+            if (self.visitorTable.get(node.name)) |func| {
+                return func(self, data, node);
+            } else {
+                if (node.children) |children| {
+                    // Return the first non-null result by default
+                    for (children.items) |child| {
+                        if (try self.visit_generic(data, &child)) |result| {
+                            return result;
+                        }
+                    }
+                    return null;
+                }
+            }
+            return null;
+        }
+
+        fn visit_rule(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?Expression {
+            //const rule = self.visit_generic(data, node.children[2], expr);
+            std.debug.print("visiting rule {s}\n", .{node.name});
+            if (node.children) |children| {
+                const label = try self.visit_generic(data, &children.items[0]);
+                // We could descend and confirm the middle node is '=', but why bother
+                const expression = try self.visit_generic(data, &children.items[2]);
+                switch (label.?) {
+                    .literal => |l| {
+                        std.debug.print("visiting rule {s}\n", .{l.value});
+                    },
+                    else => unreachable,
+                }
+                return expression;
+            }
+            return null;
+        }
+
+        fn visit_label_regex(_: *BootStrapVisitor, data: []const u8, node: *const Node) !?Expression {
+            // Send back an empty-named literal with the content as the value
+            return createLiteral("", data[node.start..node.end]);
+        }
+
+        fn visit_regex(_: *BootStrapVisitor, _: []const u8, _: *const Node) !?Expression {
+            const re = try createRegex("test", "test");
+            return re;
+        }
+    };
+
+    pub fn bootstrap(self: *Grammar, data: []const u8) !Expression {
+        const n = try self.parse(data);
+        var visitor = Grammar.BootStrapVisitor{
+            .allocator = self.allocator,
+            .visitorTable = std.StringHashMap(Grammar.BootStrapVisitor.BootStrapVisitorSignature).init(self.allocator),
+        };
+        //var root_expr = Expression{ .literal = Literal{ .name = "_", .value = "" } };
+
+        const root_expr = try visitor.visit(data, &n.?);
+        return root_expr.?;
+    }
+
+    fn addExpression(self: *Grammar, name: []const u8, expr: *Expression) !void {
+        const result = try self.references.getOrPut(name);
+        if (result.found_existing) {
+            return GrammarError.DuplicateLabel;
+        } else {
+            result.value_ptr.* = expr;
+        }
+    }
+
+    // Return a tree of Nodes after parsing. Optionals are used to indicate if no match was found.
+    fn parseInner(self: *Grammar, exp: *const Expression, data: []const u8, pos: *usize) !?Node {
+        const toParse = data[pos.*..];
+        std.debug.print("remaining: {s}\n", .{toParse});
+        switch (exp.*) {
+            .regex => |r| {
+                std.debug.print("regex name={s}\n", .{r.name});
+                if (find(r.re, toParse)) |result| {
+                    std.debug.print("regex match: {s}\n", .{toParse[0..result]});
+                    const old_pos = pos.*;
+                    pos.* += result;
+                    return Node{ .name = r.name, .start = old_pos, .end = pos.* };
+                } else {
+                    return null;
+                }
+            },
+            .literal => |l| {
+                std.debug.print("literal value={s}\n", .{l.value});
+                if (std.mem.startsWith(u8, toParse, l.value)) {
+                    const old_pos = pos.*;
+                    pos.* += l.value.len;
+                    return Node{ .name = l.name, .start = old_pos, .end = pos.* };
+                }
+            },
+            .sequence => |s| {
+                var children = std.ArrayList(Node).init(self.allocator);
+                const old_pos = pos.*;
+                for (s.children) |c| {
+                    if (try self.parseInner(&c, data, pos)) |n| {
+                        try children.append(n);
+                    } else {
+                        pos.* = old_pos;
+                        return null;
+                    }
+                }
+                return Node{ .name = s.name, .start = old_pos, .end = pos.*, .children = children };
+            },
+            .choice => |s| {
+                var children = std.ArrayList(Node).init(self.allocator);
+                const old_pos = pos.*;
+                for (s.children) |c| {
+                    if (try self.parseInner(&c, data, pos)) |n| {
+                        try children.append(n);
+                        return Node{ .name = s.name, .start = old_pos, .end = pos.*, .children = children };
+                    } else {
+                        pos.* = old_pos;
+                    }
+                }
+                return null;
+            },
+            .lookahead => |l| {
+                const old_pos = pos.*;
+                const parsedNode = try self.parseInner(l.child, data, pos);
+                pos.* = old_pos; // Always roll back the position
+                if (parsedNode) |_| {
+                    return if (l.negative) null else Node{ .name = l.name, .start = old_pos, .end = old_pos };
+                } else {
+                    return if (!l.negative) null else Node{ .name = l.name, .start = old_pos, .end = old_pos };
+                }
+            },
+            .quantity => |q| {
+                var children = std.ArrayList(Node).init(self.allocator);
+                const old_pos = pos.*;
+                for (0..q.max) |i| {
+                    if (try self.parseInner(q.child, data, pos)) |parsedNode| {
+                        try children.append(parsedNode);
+                    } else {
+                        if (i >= q.min and i <= q.max) {
+                            return Node{ .name = q.name, .start = old_pos, .end = pos.*, .children = children };
+                        } else {
+                            return null;
+                        }
+                    }
+                }
+            },
+        }
+        return null;
     }
 };
 
@@ -335,15 +519,19 @@ pub fn main() !void {
         },
     );
     const quoted_literal = createSequence(
-        "quoted",
+        "quoted_literal",
         &[_]Expression{
-            try createRegex("quoted_literal", "\"[^\"\\\\]*(?:\\\\.[^\"\\\\]*)*\""),
+            try createRegex("quoted_regex", "\"[^\"\\\\]*(?:\\\\.[^\"\\\\]*)*\""),
             ignore,
         },
     );
     const regex_exp = createSequence("regex", &[_]Expression{ createLiteral("tilde", "~"), quoted_literal });
     const reference = createSequence("reference", &[_]Expression{ label, createNot("_", &equals) });
-    const atom = createChoice("atom", &[_]Expression{ reference, quoted_literal, regex_exp });
+    const atom = createChoice("atom", &[_]Expression{
+        reference,
+        quoted_literal,
+        regex_exp,
+    });
     const quantifier = createSequence("quantifier", &[_]Expression{ try createRegex("quantifier_re", "[*+?]"), ignore });
     const quantified = createSequence("quantified", &[_]Expression{ atom, quantifier });
     const term = createChoice("term", &[_]Expression{ atom, quantified });
@@ -360,12 +548,12 @@ pub fn main() !void {
         createOneOrMore("or_term_plus", &or_term),
     });
     const expression = createChoice("expression", &[_]Expression{ ored, sequence, term });
-    const rule = Expression{ .sequence = Sequence{ .name = "rule", .children = &[_]Expression{
+    const rule = createSequence("rule", &[_]Expression{
         label,
         equals,
         expression,
-    } } };
-    const rules = createSequence("rules", &[_]Expression{ ignore, createZeroOrMore("_rules", &rule) });
+    });
+    const rules = createSequence("rules", &[_]Expression{ ignore, createZeroOrMore("rules", &rule) });
     rule.print(0);
 
     var g = Grammar.init(allocator);
@@ -377,7 +565,10 @@ pub fn main() !void {
         \\comment = ~"#[^\r\n]*"
     ;
     const n = try g.parse(testStr) orelse unreachable;
-    n.print(0);
+    n.print(testStr, 0);
+    const full_expr = try g.bootstrap(testStr);
+    std.debug.print("bootstrapped\n", .{});
+    full_expr.print(0);
 }
 
 test "simple test" {

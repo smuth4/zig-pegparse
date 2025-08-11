@@ -365,6 +365,7 @@ const Grammar = struct {
             try self.visitorTable.put("sequence", &BootStrapVisitor.visit_sequence);
             try self.visitorTable.put("ored", &BootStrapVisitor.visit_ored);
             try self.visitorTable.put("reference", &BootStrapVisitor.visit_reference);
+            try self.visitorTable.put("quantified", &BootStrapVisitor.visit_quantified);
             std.debug.assert(std.mem.eql(u8, node.name, "rules"));
             var rules = ExpressionList.init(self.allocator);
             const rulesNode = node.children.?.items[1];
@@ -461,6 +462,20 @@ const Grammar = struct {
             // Send back an empty-value literal with the data as the name
             const ref_text = try self.visit_generic(data, &node.children.?.items[0]);
             return try self.grammar.createReference("", getLiteralValue(ref_text.?));
+        }
+
+        fn visit_quantified(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {
+            // Only supports * for bootstrapping
+            const child = try self.visit_generic(data, &node.children.?.items[0]);
+            const q = try self.visit_generic(data, &node.children.?.items[1]);
+            if (q) |good_q| {
+                if (getLiteralValue(good_q)[0] == '*') {
+                    return try self.grammar.createZeroOrMore("", child.?);
+                } else if (getLiteralValue(good_q)[0] == '+') {
+                    return try self.grammar.createOneOrMore("", child.?);
+                }
+            }
+            return child;
         }
 
         fn visit_label_regex(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {

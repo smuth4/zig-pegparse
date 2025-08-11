@@ -13,21 +13,15 @@ const Node = struct {
     name: []const u8,
     start: usize,
     end: usize,
-    children: ?NodeList = null, // null here means a leaf node
+    children: ?NodeList = null, // null here means a leaf node, TODO: does this really save anything over a empty list?
 
     fn print(self: *const Node, data: []const u8, i: u32) void {
-        //if (self.name[0] == '_') {
-        //    return;
-        //}
         indent(i);
         std.debug.print("node name={s} start={d} end={d}\n", .{ self.name, self.start, self.end });
         indent(i);
         std.debug.print("value={s}\n", .{data[self.start..self.end]});
         if (self.children) |children| {
             for (children.items) |c| {
-                //if (c.name[0] == '_') {
-                //    continue;
-                //}
                 c.print(data, i + 2);
             }
         }
@@ -373,7 +367,6 @@ const Grammar = struct {
             try self.visitorTable.put("reference", &BootStrapVisitor.visit_reference);
             std.debug.assert(std.mem.eql(u8, node.name, "rules"));
             var rules = ExpressionList.init(self.allocator);
-            //node.print(data, 0);
             const rulesNode = node.children.?.items[1];
             for (rulesNode.children.?.items) |child| {
                 std.debug.print("rule child: {s}\n", .{child.name});
@@ -455,8 +448,6 @@ const Grammar = struct {
                 // We could descend and confirm the middle node is '=', but why bother
                 const expression = try self.visit_generic(data, &children.items[2]);
                 return self.grammar.initExpression(label, expression.?.*.matcher);
-                //const constructed_expr: ?*Expression = Expression{ .name = label, .matcher = expression.?.matcher };
-                //return constructed_expr;
             }
             return null;
         }
@@ -797,10 +788,6 @@ pub fn main() !void {
 
     _ = try g.bootstrap();
     std.debug.print("bootstrapped\n", .{});
-    var keyItr = g.references.keyIterator();
-    while (keyItr.next()) |key| {
-        std.debug.print("registered ref: {s}\n", .{key.*});
-    }
     g.print();
 }
 

@@ -282,10 +282,11 @@ const Grammar = struct {
     }
 
     fn print(self: *Grammar) void {
-        self.printInner(self.root, 0);
+        var referenceStack = std.ArrayList([]const u8).init(self.allocator);
+        self.printInner(&referenceStack, self.root, 0);
     }
 
-    fn printInner(self: *Grammar, e: *const Expression, i: u32) void {
+    fn printInner(self: *Grammar, rs: *std.ArrayList([]const u8), e: *const Expression, i: u32) void {
         indent(i);
         switch (e.*.matcher) {
             .regex => |_| {
@@ -297,7 +298,16 @@ const Grammar = struct {
             .reference => |r| {
                 std.debug.print("reference name={s} target=\"{s}\"\n", .{ e.name, r.target });
                 if (self.references.get(r.target)) |ref| {
-                    self.printInner(ref, i + 2);
+                    for (rs.items) |rsc| {
+                        if (std.mem.eql(u8, rsc, r.target)) {
+                            indent(i + 2);
+                            std.debug.print("terminating cyclic reference!\n", .{});
+                            return;
+                        }
+                    }
+                    rs.append(r.target) catch {};
+                    self.printInner(rs, ref, i + 2);
+                    _ = rs.pop().?;
                 } else {
                     indent(i + 2);
                     std.debug.print("undefined!\n", .{});
@@ -306,19 +316,19 @@ const Grammar = struct {
             .sequence => |s| {
                 std.debug.print("seq name={s}\n", .{e.name});
                 for (s.children.items) |c| {
-                    self.printInner(c, i + 2);
+                    self.printInner(rs, c, i + 2);
                 }
             },
             .choice => |s| {
                 std.debug.print("choice name={s}\n", .{e.name});
                 //std.debug.print("choice", .{});
                 for (s.children.items) |c| {
-                    self.printInner(c, i + 2);
+                    self.printInner(rs, c, i + 2);
                 }
             },
             .quantity => |q| {
                 std.debug.print("quantity name={s} min={d} max={d}\n", .{ e.name, q.min, q.max });
-                self.printInner(q.child, i + 2);
+                self.printInner(rs, q.child, i + 2);
             },
             .lookahead => |l| {
                 if (l.negative) {
@@ -326,7 +336,7 @@ const Grammar = struct {
                 } else {
                     std.debug.print("lookahead name={s}\n", .{e.name});
                 }
-                self.printInner(l.child, i + 2);
+                self.printInner(rs, l.child, i + 2);
             },
         }
     }

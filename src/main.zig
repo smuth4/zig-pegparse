@@ -191,9 +191,7 @@ const Expression = struct {
         //std.debug.print("remaining: {s}\n", .{toParse});
         switch (self.*) {
             .regex => |r| {
-                std.debug.print("regex name={s}\n", .{self.name});
                 if (find(r.re, toParse)) |result| {
-                    std.debug.print("regex match: {s}\n", .{toParse[0..result]});
                     const old_pos = pos.*;
                     pos.* += result;
                     return Node{ .name = r.name, .start = old_pos, .end = pos.* };
@@ -202,7 +200,6 @@ const Expression = struct {
                 }
             },
             .literal => |l| {
-                std.debug.print("literal value={s}\n", .{l.value});
                 if (std.mem.startsWith(u8, toParse, l.value)) {
                     const old_pos = pos.*;
                     pos.* += l.value.len;

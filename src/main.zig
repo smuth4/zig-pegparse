@@ -87,7 +87,7 @@ fn find(regexp: *regex.pcre2_code_8, haystack: []const u8) ?usize {
     return ovector[1] - ovector[0];
 }
 
-const ExpressionList = std.ArrayList(Expression);
+const ExpressionList = std.ArrayList(*Expression);
 const Literal = struct {
     value: []const u8,
 };
@@ -98,11 +98,11 @@ const Regex = struct {
 };
 
 const Sequence = struct {
-    children: []const Expression,
+    children: ExpressionList,
 };
 
 const Choice = struct {
-    children: []const Expression,
+    children: ExpressionList,
 };
 
 // Handles ?, *, +, and {min,max}
@@ -137,7 +137,7 @@ const Expression = struct {
         lookahead: Lookahead,
     };
 
-    name: []const u8,
+    name: []const u8, // Name can't be changed once created
     matcher: Matcher,
 
     fn print(self: *const Expression, i: u32) void {
@@ -151,13 +151,14 @@ const Expression = struct {
             },
             .sequence => |s| {
                 std.debug.print("seq name={s}\n", .{self.name});
-                for (s.children) |c| {
+                for (s.children.items) |c| {
                     c.print(i + 2);
                 }
             },
             .choice => |s| {
                 std.debug.print("choice name={s}\n", .{self.name});
-                for (s.children) |c| {
+                //std.debug.print("choice", .{});
+                for (s.children.items) |c| {
                     c.print(i + 2);
                 }
             },
@@ -179,7 +180,7 @@ const Expression = struct {
     // Return a tree of Nodes after parsing. Optionals are used to indicate if no match was found.
     fn parse(self: *const Expression, allocator: Allocator, data: []const u8, pos: *usize) !?Node {
         const toParse = data[pos.*..];
-        std.debug.print("remaining: {s}\n", .{toParse});
+        //std.debug.print("remaining: {s}\n", .{toParse});
         switch (self.*) {
             .regex => |r| {
                 std.debug.print("regex name={s}\n", .{self.name});
@@ -259,7 +260,7 @@ const Expression = struct {
 const ReferenceTable = std.StringHashMap(*Expression);
 const Grammar = struct {
     // Where parsing starts from
-    root: Expression,
+    root: *Expression,
     // Holds points to expressions for reference lookups
     references: ReferenceTable,
     allocator: Allocator,
@@ -269,7 +270,7 @@ const Grammar = struct {
             // This needs to be filled for parse() to actually do
             // anything, we'll set it with a manually constructed
             // expression for a first bootstrap
-            .root = Expression{ .name = "", .matcher = .{ .literal = .{ .value = "" } } },
+            .root = undefined,
             .allocator = allocator,
             .references = ReferenceTable.init(allocator),
         };
@@ -278,7 +279,7 @@ const Grammar = struct {
     // Parse pre-loaded data according to the grammar
     pub fn parse(self: *Grammar, data: []const u8) !?Node {
         var pos: usize = 0;
-        const n = try self.parseInner(&self.root, data, &pos);
+        const n = try self.parseInner(self.root, data, &pos);
         if (pos != data.len) {
             std.debug.print("did not reach end\n", .{});
             return null;
@@ -289,32 +290,46 @@ const Grammar = struct {
     // Inside Grammar to have access to the reference table, but
     // ideally a reference for any visitor implementations
     const BootStrapVisitor = struct {
-        const BootStrapVisitorSignature = *const fn (self: *BootStrapVisitor, data: []const u8, node: *const Node) anyerror!?Expression;
+        const BootStrapVisitorSignature = *const fn (self: *BootStrapVisitor, data: []const u8, node: *const Node) anyerror!?*Expression;
         visitorTable: std.StringHashMap(BootStrapVisitorSignature),
         allocator: Allocator,
         grammar: *Grammar,
 
-        fn visit(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?Expression {
+        fn visit(self: *BootStrapVisitor, data: []const u8, node: *const Node) !*Expression {
+            // Clear this grammar before re-loading any references
+            self.grammar.references.clearRetainingCapacity();
             try self.visitorTable.put("regex", &BootStrapVisitor.visit_regex);
             try self.visitorTable.put("rule", &BootStrapVisitor.visit_rule);
             try self.visitorTable.put("label_regex", &BootStrapVisitor.visit_label_regex);
+            try self.visitorTable.put("quoted_regex", &BootStrapVisitor.visit_quoted_regex);
+            try self.visitorTable.put("sequence", &BootStrapVisitor.visit_sequence);
+            try self.visitorTable.put("ored", &BootStrapVisitor.visit_ored);
             std.debug.assert(std.mem.eql(u8, node.name, "rules"));
             var rules = ExpressionList.init(self.allocator);
-            for (node.children.?.items) |child| {
+            //node.print(data, 0);
+            const rulesNode = node.children.?.items[1];
+            for (rulesNode.children.?.items) |child| {
+                std.debug.print("rule child: {s}\n", .{child.name});
                 if (try self.visit_generic(data, &child)) |result| {
-                    std.debug.print("full rule", .{});
+                    std.debug.print("full rule\n", .{});
                     try rules.append(result);
                 }
             }
-            return self.visit_generic(data, node);
+            return try self.grammar.createSequence("rules", rules.items);
         }
 
-        fn visit_generic(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?Expression {
-            // Skip over anything without a name or a name starting with '_'
-            if (node.name.len == 0 or node.name[0] == '_') {
+        fn getLiteralValue(expr: *const Expression) []const u8 {
+            switch (expr.matcher) {
+                .literal => |l| return l.value,
+                else => unreachable,
+            }
+        }
+
+        fn visit_generic(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {
+            // Skip over anything starting with '_'
+            if (node.name.len != 0 and node.name[0] == '_') {
                 return null;
             }
-            std.debug.print("visiting {s}\n", .{node.name});
             if (self.visitorTable.get(node.name)) |func| {
                 return func(self, data, node);
             } else {
@@ -331,40 +346,90 @@ const Grammar = struct {
             return null;
         }
 
-        fn visit_rule(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?Expression {
+        fn visit_sequence(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {
+            var exprs = ExpressionList.init(self.allocator);
+            for (node.children.?.items) |child| {
+                if (try self.visit_generic(data, &child)) |result| {
+                    try exprs.append(result);
+                }
+            }
+            const opt_expr: ?*Expression = try self.grammar.createSequence("", exprs.items);
+            return opt_expr;
+        }
+
+        fn visit_ored(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {
+            var exprs = ExpressionList.init(self.allocator);
+            for (node.children.?.items) |child| {
+                if (try self.visit_generic(data, &child)) |result| {
+                    try exprs.append(result);
+                }
+            }
+            const opt_expr: ?*Expression = try self.grammar.createChoice("", exprs.items);
+            return opt_expr;
+        }
+
+        fn visit_rule(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {
             //const rule = self.visit_generic(data, node.children[2], expr);
-            std.debug.print("visiting rule {s}\n", .{node.name});
+            node.print(data, 0);
             if (node.children) |children| {
-                const label = try self.visit_generic(data, &children.items[0]);
+                const labelExpr = try self.visit_generic(data, &children.items[0]);
+                const label = getLiteralValue(labelExpr.?);
                 // We could descend and confirm the middle node is '=', but why bother
                 const expression = try self.visit_generic(data, &children.items[2]);
-                switch (label.?.matcher) {
-                    .literal => |l| {
-                        std.debug.print("visiting rule {s}\n", .{l.value});
-                    },
-                    else => unreachable,
-                }
-                return expression;
+                return self.grammar.initExpression(label, expression.?.*.matcher);
+                //const constructed_expr: ?*Expression = Expression{ .name = label, .matcher = expression.?.matcher };
+                //return constructed_expr;
             }
             return null;
         }
 
-        fn visit_label_regex(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?Expression {
-            // Send back an empty-named literal with the content as the value
+        fn visit_quoted_regex(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {
+            // Send back an empty-value literal with the data as the name
+            return try self.grammar.createLiteral("", data[(node.start + 1)..(node.end - 1)]);
+        }
+
+        fn visit_label_regex(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {
+            // Send back an empty-value literal with the label as the name
+            if (data[node.start] == '!') {
+                return try self.grammar.createNot("", try self.grammar.createLiteral("", data[node.start + 1 .. node.end]));
+            }
             return try self.grammar.createLiteral("", data[node.start..node.end]);
         }
 
-        fn visit_regex(self: *BootStrapVisitor, _: []const u8, _: *const Node) !?Expression {
-            const re = try self.grammar.createRegex("test", "test");
+        fn visit_regex(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {
+            const quoted_re = try self.visit_generic(data, &node.children.?.items[1]);
+            const re = try self.grammar.createRegex(
+                "",
+                getLiteralValue(quoted_re.?),
+            );
             return re;
         }
     };
 
-    fn addExpression(self: *Grammar, name: []const u8, expr: *Expression) !void {
-        // Expressions with empty names can only be referenced directly
-        if (name.len == 0 or name[0] == '_') {
-            return;
+    /// Create an expression, storing it in the reference table if it
+    /// has a non-empty name, or in the cache otherwise. If neither of
+    /// those are possible, it simply gets allocated and returned.
+    fn initExpression(self: *Grammar, name: []const u8, matcher: Expression.Matcher) !*Expression {
+        const expr = try self.allocator.create(Expression);
+        expr.*.name = name;
+        expr.*.matcher = matcher;
+        if (name.len == 0) {
+            switch (matcher) {
+                else => return expr,
+            }
         }
+        const result = try self.references.getOrPut(name);
+        if (result.found_existing) {
+            std.debug.print("dupe: {s}\n", .{name});
+            return GrammarError.DuplicateLabel;
+        } else {
+            result.value_ptr.* = expr;
+        }
+        return expr;
+    }
+
+    fn addExpression(self: *Grammar, name: []const u8, expr: *Expression) !void {
+        // Expressions with empty names can only be referenced directly, but we should either cache them if possible, or just create them with the allocator if not
         std.debug.print("insert: {s}\n", .{name});
         const result = try self.references.getOrPut(name);
         if (result.found_existing) {
@@ -376,117 +441,116 @@ const Grammar = struct {
     }
 
     // Reduce boilerplate when manually constructing a grammar
-    fn createQuantity(self: *Grammar, name: []const u8, min: usize, max: usize, child: *const Expression) !Expression {
-        var expr = Expression{ .name = name, .matcher = .{ .quantity = Quantity{ .min = min, .max = max, .child = child } } };
-        try self.addExpression(expr.name, &expr);
-        return expr;
+    fn createQuantity(self: *Grammar, name: []const u8, min: usize, max: usize, child: *const Expression) !*Expression {
+        return self.initExpression(name, .{ .quantity = Quantity{ .min = min, .max = max, .child = child } });
     }
 
-    fn createZeroOrMore(self: *Grammar, name: []const u8, child: *const Expression) !Expression {
+    fn createZeroOrMore(self: *Grammar, name: []const u8, child: *const Expression) !*Expression {
         return self.createQuantity(name, 0, std.math.maxInt(usize), child);
     }
 
-    fn createOneOrMore(self: *Grammar, name: []const u8, child: *const Expression) !Expression {
+    fn createOneOrMore(self: *Grammar, name: []const u8, child: *const Expression) !*Expression {
         return self.createQuantity(name, 1, std.math.maxInt(usize), child);
     }
 
-    fn createChoice(self: *Grammar, name: []const u8, children: []const Expression) !Expression {
-        var expr = Expression{ .name = name, .matcher = .{ .choice = Choice{ .children = children } } };
-        try self.addExpression(expr.name, &expr);
-        return expr;
+    fn createChoice(self: *Grammar, name: []const u8, children: []const *Expression) !*Expression {
+        var childList = ExpressionList.init(self.allocator);
+        for (children) |c| {
+            try childList.append(c);
+        }
+        return self.initExpression(name, .{ .choice = Choice{ .children = childList } });
     }
 
-    fn createLookahead(self: *Grammar, name: []const u8, child: *const Expression) !Expression {
-        var expr = Expression{ .name = name, .matcher = .{ .lookahead = Lookahead{ .negative = false, .child = child } } };
-        try self.addExpression(expr.name, &expr);
-        return expr;
+    fn createLookahead(self: *Grammar, name: []const u8, child: *const Expression) !*Expression {
+        return self.initExpression(name, .{ .lookahead = Lookahead{ .negative = false, .child = child } });
     }
 
-    fn createNot(self: *Grammar, name: []const u8, child: *const Expression) !Expression {
-        var expr = Expression{ .name = name, .matcher = .{ .lookahead = Lookahead{ .negative = true, .child = child } } };
-        try self.addExpression(expr.name, &expr);
-        return expr;
+    fn createNot(self: *Grammar, name: []const u8, child: *const Expression) !*Expression {
+        return self.initExpression(name, .{ .lookahead = Lookahead{ .negative = true, .child = child } });
     }
 
-    fn createSequence(self: *Grammar, name: []const u8, children: []const Expression) !Expression {
-        var expr = Expression{ .name = name, .matcher = .{ .sequence = Sequence{ .children = children } } };
-        try self.addExpression(expr.name, &expr);
-        return expr;
+    fn createSequence(self: *Grammar, name: []const u8, children: []const *Expression) !*Expression {
+        var childList = ExpressionList.init(self.allocator);
+        for (children) |c| {
+            try childList.append(c);
+        }
+        return self.initExpression(name, .{ .sequence = Sequence{ .children = childList } });
     }
 
-    fn createRegex(self: *Grammar, name: []const u8, value: []const u8) !Expression {
+    fn createRegex(self: *Grammar, name: []const u8, value: []const u8) !*Expression {
         const re = compile(value) orelse return GrammarError.InvalidRegex;
-        var expr = Expression{ .name = name, .matcher = .{ .regex = Regex{ .value = value, .re = re } } };
-        try self.addExpression(expr.name, &expr);
-        return expr;
+        return self.initExpression(name, .{ .regex = Regex{ .value = value, .re = re } });
     }
 
-    fn createLiteral(self: *Grammar, name: []const u8, value: []const u8) !Expression {
-        var expr = Expression{ .name = name, .matcher = Expression.Matcher{ .literal = Literal{ .value = value } } };
-        try self.addExpression(expr.name, &expr);
-        return expr;
+    fn createLiteral(self: *Grammar, name: []const u8, value: []const u8) !*Expression {
+        return self.initExpression(name, .{ .literal = Literal{ .value = value } });
     }
 
-    pub fn bootstrap(self: *Grammar) !Expression {
+    pub fn bootstrap(self: *Grammar) !*Expression {
         // Build a basic grammar for bootstrapping
         const ws = try self.createRegex("ws", "\\s+");
         const comment = try self.createRegex("comment", "#[^\r\n]*");
-        const ignore = try self.createZeroOrMore("_ignore", &try self.createChoice(
+        const ignore = try self.createZeroOrMore("_ignore", try self.createChoice(
             "",
-            &[_]Expression{ ws, comment },
+            &[_]*Expression{ ws, comment },
         ));
-        const equals = try self.createSequence("equals", &[_]Expression{ try self.createLiteral("", "="), ignore });
+        const equals = try self.createSequence("equals", &[_]*Expression{ try self.createLiteral("", "="), ignore });
         const label = try self.createSequence(
             "label",
-            &[_]Expression{
-                try self.createRegex("label_regex", "[a-zA-Z_][a-zA-Z_0-9]*"),
+            &[_]*Expression{
+                try self.createRegex("label_regex", "!?[a-zA-Z_][a-zA-Z_0-9]*"),
                 ignore,
             },
         );
         const quoted_literal = try self.createSequence(
             "quoted_literal",
-            &[_]Expression{
+            &[_]*Expression{
                 try self.createRegex("quoted_regex", "\"[^\"\\\\]*(?:\\\\.[^\"\\\\]*)*\""),
                 ignore,
             },
         );
-        const regex_exp = try self.createSequence("regex", &[_]Expression{ try self.createLiteral("", "~"), quoted_literal });
-        const reference = try self.createSequence("reference", &[_]Expression{ label, try self.createNot("_", &equals) });
-        const atom = try self.createChoice("atom", &[_]Expression{
+        const regex_exp = try self.createSequence("regex", &[_]*Expression{ try self.createLiteral("", "~"), quoted_literal });
+        const reference = try self.createSequence("reference", &[_]*Expression{ label, try self.createNot("", equals) });
+        const atom = try self.createChoice("atom", &[_]*Expression{
             reference,
             quoted_literal,
             regex_exp,
         });
-        const quantifier = try self.createSequence("quantifier", &[_]Expression{ try self.createRegex("", "[*+?]"), ignore });
-        const quantified = try self.createSequence("quantified", &[_]Expression{ atom, quantifier });
-        const term = try self.createChoice("term", &[_]Expression{ atom, quantified });
-        const term_plus = try self.createOneOrMore("term_plus", &term); // deviation from parsimonious
-        const sequence = try self.createSequence("sequence", &[_]Expression{ term, term_plus });
-        const or_term = try self.createSequence("or_term", &[_]Expression{
+        const quantifier = try self.createSequence("quantifier", &[_]*Expression{ try self.createRegex("", "[*+?]"), ignore });
+        const quantified = try self.createSequence("quantified", &[_]*Expression{ atom, quantifier });
+        const term = try self.createChoice("term", &[_]*Expression{ quantified, atom });
+        const term_plus = try self.createOneOrMore("term_plus", term); // deviation from parsimonious
+        const sequence = try self.createSequence("sequence", &[_]*Expression{ term, term_plus });
+        const or_term = try self.createSequence("or_term", &[_]*Expression{
             try self.createLiteral("", "/"),
             ignore,
             term_plus,
         });
-        const ored = try self.createSequence("ored", &[_]Expression{
+        const ored = try self.createSequence("ored", &[_]*Expression{
             term_plus,
             ignore,
-            try self.createOneOrMore("or_term_plus", &or_term),
+            try self.createOneOrMore("or_term_plus", or_term),
         });
-        const expression = try self.createChoice("expression", &[_]Expression{ ored, sequence, term });
-        const rule = try self.createSequence("rule", &[_]Expression{
+        const expression = try self.createChoice("expression", &[_]*Expression{ ored, sequence, term });
+        const rule = try self.createSequence("rule", &[_]*Expression{
             label,
             equals,
             expression,
         });
-        const rules = try self.createSequence("rules", &[_]Expression{ ignore, try self.createZeroOrMore("", &rule) });
+        const rules = try self.createSequence("rules", &[_]*Expression{ ignore, try self.createZeroOrMore("", rule) });
 
         // Assign the rules to ourselves
         self.root = rules;
+        //self.root.print(0);
         const rule_data =
-            \\test = "test" # comment
-            \\test2 = reference
-            \\meaninglessness = ~"\s+" / comment
-            \\comment = ~"#[^\r\n]*"
+            \\reference = label !equals
+            \\thing2 = hi2
+            \\thing = !hi
+            \\label = ~"[a-zA-Z_][a-zA-Z_0-9]*(?![\"'])" _
+            \\
+            \\_ = meaninglessness*
+            \\_meaninglessness = ~"\s+" / comment
+            \\_comment = ~"#[^\r\n]*"
         ;
         const n = try self.parse(rule_data);
         var visitor = Grammar.BootStrapVisitor{
@@ -497,7 +561,7 @@ const Grammar = struct {
 
         // Bootstrap against the full rules
         const root_expr = try visitor.visit(rule_data, &n.?);
-        return root_expr.?;
+        return root_expr;
     }
 
     // Return a tree of Nodes after parsing. Optionals are used to indicate if no match was found.
@@ -527,8 +591,8 @@ const Grammar = struct {
             .sequence => |s| {
                 var children = std.ArrayList(Node).init(self.allocator);
                 const old_pos = pos.*;
-                for (s.children) |c| {
-                    if (try self.parseInner(&c, data, pos)) |n| {
+                for (s.children.items) |c| {
+                    if (try self.parseInner(c, data, pos)) |n| {
                         try children.append(n);
                     } else {
                         pos.* = old_pos;
@@ -540,8 +604,8 @@ const Grammar = struct {
             .choice => |s| {
                 var children = std.ArrayList(Node).init(self.allocator);
                 const old_pos = pos.*;
-                for (s.children) |c| {
-                    if (try self.parseInner(&c, data, pos)) |n| {
+                for (s.children.items) |c| {
+                    if (try self.parseInner(c, data, pos)) |n| {
                         try children.append(n);
                         return Node{ .name = exp.name, .start = old_pos, .end = pos.*, .children = children };
                     } else {

@@ -359,6 +359,7 @@ const Grammar = struct {
         visitorTable: std.StringHashMap(BootStrapVisitorSignature),
         allocator: Allocator,
         grammar: *Grammar,
+        referenceStack: std.ArrayList([]const u8),
 
         fn visit(self: *BootStrapVisitor, data: []const u8, node: *const Node) !*Expression {
             // Clear this grammar before re-loading any references
@@ -377,7 +378,7 @@ const Grammar = struct {
             for (rulesNode.children.?.items) |child| {
                 std.debug.print("rule child: {s}\n", .{child.name});
                 if (try self.visit_generic(data, &child)) |result| {
-                    std.debug.print("full rule\n", .{});
+                    self.grammar.printInner(&self.referenceStack, result, 0);
                     try rules.append(result);
                 }
             }
@@ -388,11 +389,12 @@ const Grammar = struct {
         fn getLiteralValue(expr: *const Expression) []const u8 {
             switch (expr.matcher) {
                 .literal => |l| return l.value,
+                .lookahead => |l| return getLiteralValue(l.child),
+                // All these are just a lazy form of debugging the type
                 .regex => unreachable,
                 .sequence => unreachable,
                 .choice => unreachable,
                 .quantity => unreachable,
-                .lookahead => |l| return getLiteralValue(l.child),
                 .reference => unreachable,
             }
         }
@@ -408,6 +410,9 @@ const Grammar = struct {
                 if (node.children) |children| {
                     // Return the first non-null result by default
                     for (children.items) |child| {
+                        if (node.name.len != 0 and node.name[0] == '_') {
+                            return null;
+                        }
                         if (try self.visit_generic(data, &child)) |result| {
                             return result;
                         }
@@ -420,7 +425,10 @@ const Grammar = struct {
 
         fn visit_sequence(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {
             var exprs = ExpressionList.init(self.allocator);
-            for (node.children.?.items) |child| {
+            if (try self.visit_generic(data, &node.children.?.items[0])) |result| {
+                try exprs.append(result);
+            }
+            for (node.children.?.items[1].children.?.items) |child| {
                 if (try self.visit_generic(data, &child)) |result| {
                     try exprs.append(result);
                 }
@@ -441,8 +449,6 @@ const Grammar = struct {
         }
 
         fn visit_rule(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {
-            //const rule = self.visit_generic(data, node.children[2], expr);
-            node.print(data, 0);
             if (node.children) |children| {
                 const labelExpr = try self.visit_generic(data, &children.items[0]);
                 const label = getLiteralValue(labelExpr.?);
@@ -620,10 +626,11 @@ const Grammar = struct {
             equals,
             expression,
         });
-        const rules = try self.createSequence("rules", &[_]*Expression{ ignore, try self.createZeroOrMore("", rule) });
+        const rules = try self.createSequence("rules", &[_]*Expression{ ignore, try self.createOneOrMore("", rule) });
 
         // Assign the rules to ourselves
         self.root = rules;
+        self.print();
         //self.root.print(0);
         const rule_data =
             \\# Ignored things (represented by _) are typically hung off the end of the
@@ -656,17 +663,22 @@ const Grammar = struct {
             \\# (which begins a new rule) from a reference (which is just a pointer to a
             \\# rule defined somewhere else):
             \\label = ~"[a-zA-Z_][a-zA-Z_0-9]*(?![\"'])" _
-            \\ 
+            \\
             \\
             \\_ = meaninglessness*
             \\meaninglessness = ~"\s+" / comment
             \\comment = ~"#[^\r\n]*"
         ;
+        //const rule_data =
+        //    \\rule = label equals expression
+        //;
         const n = try self.parse(rule_data);
+        n.?.print(rule_data, 0);
         var visitor = Grammar.BootStrapVisitor{
             .grammar = self,
             .allocator = self.allocator,
             .visitorTable = std.StringHashMap(Grammar.BootStrapVisitor.BootStrapVisitorSignature).init(self.allocator),
+            .referenceStack = std.ArrayList([]const u8).init(self.allocator),
         };
 
         // Bootstrap against the full rules
@@ -711,6 +723,7 @@ const Grammar = struct {
                 }
             },
             .sequence => |s| {
+                // TODO: deinit on failure?
                 var children = std.ArrayList(Node).init(self.allocator);
                 const old_pos = pos.*;
                 for (s.children.items) |c| {
@@ -724,6 +737,7 @@ const Grammar = struct {
                 return Node{ .name = exp.name, .start = old_pos, .end = pos.*, .children = children };
             },
             .choice => |s| {
+                // TODO: deinit on failure?
                 var children = std.ArrayList(Node).init(self.allocator);
                 const old_pos = pos.*;
                 for (s.children.items) |c| {
@@ -739,26 +753,32 @@ const Grammar = struct {
             .lookahead => |l| {
                 const old_pos = pos.*;
                 const parsedNode = try self.parseInner(l.child, data, pos);
+                const new_pos = pos.*;
                 pos.* = old_pos; // Always roll back the position
                 if (parsedNode) |_| {
-                    return if (l.negative) null else Node{ .name = exp.name, .start = old_pos, .end = old_pos };
+                    return if (l.negative) null else Node{ .name = exp.name, .start = old_pos, .end = new_pos };
                 } else {
-                    return if (!l.negative) null else Node{ .name = exp.name, .start = old_pos, .end = old_pos };
+                    return if (!l.negative) null else Node{ .name = exp.name, .start = old_pos, .end = new_pos };
                 }
             },
             .quantity => |q| {
                 var children = std.ArrayList(Node).init(self.allocator);
                 const old_pos = pos.*;
-                for (0..q.max) |i| {
-                    if (try self.parseInner(q.child, data, pos)) |parsedNode| {
-                        try children.append(parsedNode);
-                    } else {
-                        if (i >= q.min and i <= q.max) {
-                            return Node{ .name = exp.name, .start = old_pos, .end = pos.*, .children = children };
-                        } else {
-                            return null;
-                        }
+                std.debug.print("quant start: {s}\n", .{exp.name});
+                while (children.items.len < q.max and pos.* < data.len) {
+                    const parsedNode = try self.parseInner(q.child, data, pos) orelse break;
+                    try children.append(parsedNode);
+                    std.debug.print("quant good child: {s}\n", .{parsedNode.name});
+                    if (children.items.len >= q.min and parsedNode.start == parsedNode.end) {
+                        break;
                     }
+                }
+                if (children.items.len >= q.min) {
+                    std.debug.print("quant success size: {s} {d}\n", .{ exp.name, children.items.len });
+                    return Node{ .name = exp.name, .start = old_pos, .end = pos.*, .children = children };
+                } else {
+                    pos.* = old_pos;
+                    return null;
                 }
             },
         }
@@ -784,20 +804,9 @@ pub fn main() !void {
     g.print();
 }
 
-test "simple test" {
+test "quant test" {
     var list = std.ArrayList(i32).init(std.testing.allocator);
     defer list.deinit(); // Try commenting this out and see if zig detects the memory leak!
     try list.append(42);
     try std.testing.expectEqual(@as(i32, 42), list.pop());
-}
-
-test "fuzz example" {
-    const Context = struct {
-        fn testOne(context: @This(), input: []const u8) anyerror!void {
-            _ = context;
-            // Try passing `--fuzz` to `zig build test` and see if it manages to fail this test case!
-            try std.testing.expect(!std.mem.eql(u8, "canyoufindme", input));
-        }
-    };
-    try std.testing.fuzz(Context{}, Context.testOne, .{});
 }

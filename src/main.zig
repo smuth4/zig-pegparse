@@ -92,6 +92,10 @@ const Literal = struct {
     value: []const u8,
 };
 
+const Reference = struct {
+    target: []const u8,
+};
+
 const Regex = struct {
     value: []const u8,
     re: *regex.pcre2_code_8,
@@ -135,6 +139,7 @@ const Expression = struct {
         quantity: Quantity,
         choice: Choice,
         lookahead: Lookahead,
+        reference: Reference,
     };
 
     name: []const u8, // Name can't be changed once created
@@ -148,6 +153,9 @@ const Expression = struct {
             },
             .literal => |l| {
                 std.debug.print("literal name={s} value={s}\n", .{ self.name, l.value });
+            },
+            .reference => |r| {
+                std.debug.print("reference name={s} target={s}\n", .{ self.name, r.target });
             },
             .sequence => |s| {
                 std.debug.print("seq name={s}\n", .{self.name});
@@ -202,7 +210,7 @@ const Expression = struct {
                 }
             },
             .sequence => |s| {
-                var children = std.ArrayList(Node).init(allocator);
+                var children = NodeList.init(allocator);
                 const old_pos = pos.*;
                 for (s.children) |c| {
                     if (try c.parse(allocator, data, pos)) |n| {
@@ -215,7 +223,7 @@ const Expression = struct {
                 return Node{ .name = self.name, .start = old_pos, .end = pos.*, .children = children };
             },
             .choice => |s| {
-                var children = std.ArrayList(Node).init(allocator);
+                var children = NodeList.init(allocator);
                 const old_pos = pos.*;
                 for (s.children) |c| {
                     if (try c.parse(allocator, data, pos)) |n| {
@@ -276,6 +284,56 @@ const Grammar = struct {
         };
     }
 
+    fn print(self: *Grammar) void {
+        self.printInner(self.root, 0);
+    }
+
+    fn printInner(self: *Grammar, e: *const Expression, i: u32) void {
+        indent(i);
+        switch (e.*.matcher) {
+            .regex => |_| {
+                std.debug.print("regex name={s}\n", .{e.name});
+            },
+            .literal => |l| {
+                std.debug.print("literal name={s} value={s}\n", .{ e.name, l.value });
+            },
+            .reference => |r| {
+                std.debug.print("reference name={s} target=\"{s}\"\n", .{ e.name, r.target });
+                if (self.references.get(r.target)) |ref| {
+                    self.printInner(ref, i + 2);
+                } else {
+                    indent(i + 2);
+                    std.debug.print("undefined!\n", .{});
+                }
+            },
+            .sequence => |s| {
+                std.debug.print("seq name={s}\n", .{e.name});
+                for (s.children.items) |c| {
+                    self.printInner(c, i + 2);
+                }
+            },
+            .choice => |s| {
+                std.debug.print("choice name={s}\n", .{e.name});
+                //std.debug.print("choice", .{});
+                for (s.children.items) |c| {
+                    self.printInner(c, i + 2);
+                }
+            },
+            .quantity => |q| {
+                std.debug.print("quantity name={s} min={d} max={d}\n", .{ e.name, q.min, q.max });
+                self.printInner(q.child, i + 2);
+            },
+            .lookahead => |l| {
+                if (l.negative) {
+                    std.debug.print("not name={s}\n", .{e.name});
+                } else {
+                    std.debug.print("lookahead name={s}\n", .{e.name});
+                }
+                self.printInner(l.child, i + 2);
+            },
+        }
+    }
+
     // Parse pre-loaded data according to the grammar
     pub fn parse(self: *Grammar, data: []const u8) !?Node {
         var pos: usize = 0;
@@ -287,7 +345,7 @@ const Grammar = struct {
         return n;
     }
 
-    // Inside Grammar to have access to the reference table, but
+    // Needs to have access to the grammaer's reference table, but
     // ideally a reference for any visitor implementations
     const BootStrapVisitor = struct {
         const BootStrapVisitorSignature = *const fn (self: *BootStrapVisitor, data: []const u8, node: *const Node) anyerror!?*Expression;
@@ -304,6 +362,7 @@ const Grammar = struct {
             try self.visitorTable.put("quoted_regex", &BootStrapVisitor.visit_quoted_regex);
             try self.visitorTable.put("sequence", &BootStrapVisitor.visit_sequence);
             try self.visitorTable.put("ored", &BootStrapVisitor.visit_ored);
+            try self.visitorTable.put("reference", &BootStrapVisitor.visit_reference);
             std.debug.assert(std.mem.eql(u8, node.name, "rules"));
             var rules = ExpressionList.init(self.allocator);
             //node.print(data, 0);
@@ -315,13 +374,19 @@ const Grammar = struct {
                     try rules.append(result);
                 }
             }
-            return try self.grammar.createSequence("rules", rules.items);
+            return rules.items[0];
         }
 
+        // Kinda gross, might get optimized well but never expose
         fn getLiteralValue(expr: *const Expression) []const u8 {
             switch (expr.matcher) {
                 .literal => |l| return l.value,
-                else => unreachable,
+                .regex => unreachable,
+                .sequence => unreachable,
+                .choice => unreachable,
+                .quantity => unreachable,
+                .lookahead => |l| return getLiteralValue(l.child),
+                .reference => unreachable,
             }
         }
 
@@ -388,6 +453,12 @@ const Grammar = struct {
             return try self.grammar.createLiteral("", data[(node.start + 1)..(node.end - 1)]);
         }
 
+        fn visit_reference(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {
+            // Send back an empty-value literal with the data as the name
+            const ref_text = try self.visit_generic(data, &node.children.?.items[0]);
+            return try self.grammar.createReference("", getLiteralValue(ref_text.?));
+        }
+
         fn visit_label_regex(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {
             // Send back an empty-value literal with the label as the name
             if (data[node.start] == '!') {
@@ -423,6 +494,7 @@ const Grammar = struct {
             std.debug.print("dupe: {s}\n", .{name});
             return GrammarError.DuplicateLabel;
         } else {
+            std.debug.print("insert reference: {s}\n", .{name});
             result.value_ptr.* = expr;
         }
         return expr;
@@ -486,6 +558,10 @@ const Grammar = struct {
         return self.initExpression(name, .{ .literal = Literal{ .value = value } });
     }
 
+    fn createReference(self: *Grammar, name: []const u8, target: []const u8) !*Expression {
+        return self.initExpression(name, .{ .reference = Reference{ .target = target } });
+    }
+
     pub fn bootstrap(self: *Grammar) !*Expression {
         // Build a basic grammar for bootstrapping
         const ws = try self.createRegex("ws", "\\s+");
@@ -543,14 +619,41 @@ const Grammar = struct {
         self.root = rules;
         //self.root.print(0);
         const rule_data =
+            \\# Ignored things (represented by _) are typically hung off the end of the
+            \\# leafmost kinds of nodes. Literals like "/" count as leaves.
+            \\
+            \\rules = _ rule*
+            \\rule = label equals expression
+            \\equals = "=" _
+            \\literal = spaceless_literal _
+            \\
+            \\# So you can't spell a regex like `~"..." ilm`:
+            \\spaceless_literal = ~"\"[^\"\\\\]*(?:\\\\.[^\"\\\\]*)*\""is /
+            \\                    ~"'[^'\\\\]*(?:\\\\.[^'\\\\]*)*'"is
+            \\
+            \\expression = ored / sequence / term
+            \\or_term = "/" _ term+
+            \\ored = term+ or_term+
+            \\sequence = term term+
+            \\not_term = "!" term _
+            \\lookahead_term = "&" term _
+            \\term = not_term / lookahead_term / quantified / atom
+            \\quantified = atom quantifier
+            \\atom = reference / literal / regex / parenthesized
+            \\regex = "~" spaceless_literal ~"[ilmsuxa]*"i _
+            \\parenthesized = "(" _ expression ")" _
+            \\quantifier = ~"[*+?]|\{\d*,\d+\}|\{\d+,\d*\}|\{\d+\}" _
             \\reference = label !equals
-            \\thing2 = hi2
-            \\thing = !hi
+            \\
+            \\# A subsequent equal sign is the only thing that distinguishes a label
+            \\# (which begins a new rule) from a reference (which is just a pointer to a
+            \\# rule defined somewhere else):
             \\label = ~"[a-zA-Z_][a-zA-Z_0-9]*(?![\"'])" _
+            \\ 
             \\
             \\_ = meaninglessness*
-            \\_meaninglessness = ~"\s+" / comment
-            \\_comment = ~"#[^\r\n]*"
+            \\meaninglessness = ~"\s+" / comment
+            \\comment = ~"#[^\r\n]*"
         ;
         const n = try self.parse(rule_data);
         var visitor = Grammar.BootStrapVisitor{
@@ -561,6 +664,7 @@ const Grammar = struct {
 
         // Bootstrap against the full rules
         const root_expr = try visitor.visit(rule_data, &n.?);
+        self.root = root_expr;
         return root_expr;
     }
 
@@ -572,6 +676,11 @@ const Grammar = struct {
             .regex => |r| {
                 std.debug.print("regex name={s}\n", .{exp.name});
                 if (find(r.re, toParse)) |result| {
+                    // Regexes are one of the only types that can
+                    // match 0-length nodes, ignore those
+                    if (result == 0) {
+                        return null;
+                    }
                     std.debug.print("regex match: {s}\n", .{toParse[0..result]});
                     const old_pos = pos.*;
                     pos.* += result;
@@ -586,6 +695,12 @@ const Grammar = struct {
                     const old_pos = pos.*;
                     pos.* += l.value.len;
                     return Node{ .name = exp.name, .start = old_pos, .end = pos.* };
+                }
+            },
+            .reference => |r| {
+                std.debug.print("reference target={s}\n", .{r.target});
+                if (self.references.get(r.target)) |ref| {
+                    return self.parseInner(ref, data, pos);
                 }
             },
             .sequence => |s| {
@@ -653,9 +768,13 @@ pub fn main() !void {
 
     var g = Grammar.init(allocator);
 
-    const full_expr = try g.bootstrap();
+    _ = try g.bootstrap();
     std.debug.print("bootstrapped\n", .{});
-    full_expr.print(0);
+    var keyItr = g.references.keyIterator();
+    while (keyItr.next()) |key| {
+        std.debug.print("registered ref: {s}\n", .{key.*});
+    }
+    g.print();
 }
 
 test "simple test" {

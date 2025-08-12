@@ -30,13 +30,13 @@ const Node = struct {
 
 /// Compiles a regex pattern string and returns a pattern code you can use
 /// to match subjects. Returns `null` if something is wrong with the pattern
-fn compile(needle: []const u8) ?*regex.pcre2_code_8 {
-    const pattern: regex.PCRE2_SPTR8 = &needle[0];
+fn compile(needle: []const u8, flag: u8) ?*regex.pcre2_code_8 {
+    const pattern: regex.PCRE2_SPTR8 = needle.ptr;
     const patternLen: regex.PCRE2_SIZE = needle.len;
     var errornumber: c_int = undefined;
     var erroroffset: regex.PCRE2_SIZE = undefined;
 
-    const regexp: ?*regex.pcre2_code_8 = regex.pcre2_compile_8(pattern, patternLen, 0, &errornumber, &erroroffset, null);
+    const regexp: ?*regex.pcre2_code_8 = regex.pcre2_compile_8(pattern, patternLen, flag, &errornumber, &erroroffset, null);
     if (regexp == null) {
         std.debug.print("re err: {d}\n", .{errornumber});
         var errbuf: [512]u8 = undefined;
@@ -51,10 +51,7 @@ fn compile(needle: []const u8) ?*regex.pcre2_code_8 {
 /// test which is the haystack and returns either the length of the
 /// left-anchored match if found, or null if no match was found.
 fn find(regexp: *regex.pcre2_code_8, haystack: []const u8) ?usize {
-    if (haystack.len == 0) {
-        return null;
-    }
-    const subject: regex.PCRE2_SPTR8 = &haystack[0];
+    const subject: regex.PCRE2_SPTR8 = haystack.ptr;
     const subjLen: regex.PCRE2_SIZE = haystack.len;
 
     const matchData: ?*regex.pcre2_match_data_8 = regex.pcre2_match_data_create_from_pattern_8(regexp, null);
@@ -601,7 +598,7 @@ const Grammar = struct {
     }
 
     fn createRegex(self: *Grammar, name: []const u8, value: []const u8) !*Expression {
-        const re = compile(value) orelse return GrammarError.InvalidRegex;
+        const re = compile(value, 0) orelse return GrammarError.InvalidRegex;
         return self.initExpression(name, .{ .regex = Regex{ .value = value, .re = re } });
     }
 

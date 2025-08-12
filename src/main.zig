@@ -107,13 +107,13 @@ const Choice = struct {
 const Quantity = struct {
     min: usize,
     max: usize,
-    child: *const Expression,
+    child: *Expression,
 };
 
 // Handles both ! and &
 const Lookahead = struct {
     negative: bool = false,
-    child: *const Expression,
+    child: *Expression,
 };
 
 const GrammarError = error{ InvalidRegex, DuplicateLabel };
@@ -351,27 +351,36 @@ const Grammar = struct {
         return n;
     }
 
-    // Needs to have access to the grammaer's reference table, but
-    // ideally a reference for any visitor implementations
-    // TODO: This was fun, but is probably better off manually constructed
-    const BootStrapVisitor = struct {
-        const BootStrapVisitorSignature = *const fn (self: *BootStrapVisitor, data: []const u8, node: *const Node) anyerror!?*Expression;
-        visitorTable: std.StringHashMap(BootStrapVisitorSignature),
+    pub fn createGrammar(self: *Grammar, data: []const u8) Grammar {
+        var grammar = Grammar.init(self.allocator);
+        var visitor = Grammar.ExpressionVisitor{
+            .grammar = &grammar,
+            .allocator = self.allocator,
+            .visitorTable = std.StringHashMap(Grammar.ExpressionVisitor.ExpressionVisitorSignature),
+            .referenceStack = std.ArrayList([]const u8).init(self.allocator),
+        };
+        visitor.vist(self.parse(data));
+    }
+
+    /// Converts a node tree into a full grammar
+    const ExpressionVisitor = struct {
+        const ExpressionVisitorSignature = *const fn (self: *ExpressionVisitor, data: []const u8, node: *const Node) anyerror!?*Expression;
+        visitorTable: std.StringHashMap(ExpressionVisitorSignature),
         allocator: Allocator,
         grammar: *Grammar,
         referenceStack: std.ArrayList([]const u8),
 
-        fn visit(self: *BootStrapVisitor, data: []const u8, node: *const Node) !*Expression {
+        fn visit(self: *ExpressionVisitor, data: []const u8, node: *const Node) !void {
             // Clear this grammar before re-loading any references
             self.grammar.references.clearRetainingCapacity();
-            try self.visitorTable.put("regex", &BootStrapVisitor.visit_regex);
-            try self.visitorTable.put("rule", &BootStrapVisitor.visit_rule);
-            try self.visitorTable.put("label_regex", &BootStrapVisitor.visit_label_regex);
-            try self.visitorTable.put("quoted_regex", &BootStrapVisitor.visit_quoted_regex);
-            try self.visitorTable.put("sequence", &BootStrapVisitor.visit_sequence);
-            try self.visitorTable.put("ored", &BootStrapVisitor.visit_ored);
-            try self.visitorTable.put("reference", &BootStrapVisitor.visit_reference);
-            try self.visitorTable.put("quantified", &BootStrapVisitor.visit_quantified);
+            try self.visitorTable.put("regex", &ExpressionVisitor.visit_regex);
+            try self.visitorTable.put("rule", &ExpressionVisitor.visit_rule);
+            try self.visitorTable.put("label_regex", &ExpressionVisitor.visit_label_regex);
+            try self.visitorTable.put("quoted_regex", &ExpressionVisitor.visit_quoted_regex);
+            try self.visitorTable.put("sequence", &ExpressionVisitor.visit_sequence);
+            try self.visitorTable.put("ored", &ExpressionVisitor.visit_ored);
+            try self.visitorTable.put("reference", &ExpressionVisitor.visit_reference);
+            try self.visitorTable.put("quantified", &ExpressionVisitor.visit_quantified);
             std.debug.assert(std.mem.eql(u8, node.name, "rules"));
             var rules = ExpressionList.init(self.allocator);
             const rulesNode = node.children.?.items[1];
@@ -382,7 +391,7 @@ const Grammar = struct {
                     try rules.append(result);
                 }
             }
-            return rules.items[0];
+            self.grammar.root = rules.items[0];
         }
 
         // Kinda gross, might get optimized well but never expose
@@ -399,7 +408,7 @@ const Grammar = struct {
             }
         }
 
-        fn visit_generic(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {
+        fn visit_generic(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
             // Skip over anything starting with '_'
             if (node.name.len != 0 and node.name[0] == '_') {
                 return null;
@@ -423,7 +432,7 @@ const Grammar = struct {
             return null;
         }
 
-        fn visit_sequence(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {
+        fn visit_sequence(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
             var exprs = ExpressionList.init(self.allocator);
             if (try self.visit_generic(data, &node.children.?.items[0])) |result| {
                 try exprs.append(result);
@@ -437,7 +446,7 @@ const Grammar = struct {
             return opt_expr;
         }
 
-        fn visit_ored(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {
+        fn visit_ored(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
             var exprs = ExpressionList.init(self.allocator);
             if (try self.visit_generic(data, &node.children.?.items[0])) |result| {
                 try exprs.append(result);
@@ -451,7 +460,7 @@ const Grammar = struct {
             return opt_expr;
         }
 
-        fn visit_rule(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {
+        fn visit_rule(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
             if (node.children) |children| {
                 const labelExpr = try self.visit_generic(data, &children.items[0]);
                 const label = getLiteralValue(labelExpr.?);
@@ -462,12 +471,12 @@ const Grammar = struct {
             return null;
         }
 
-        fn visit_quoted_regex(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {
+        fn visit_quoted_regex(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
             // Send back an empty-value literal with the data as the name
             return try self.grammar.createLiteral("", data[(node.start + 1)..(node.end - 1)]);
         }
 
-        fn visit_reference(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {
+        fn visit_reference(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
             // Send back an empty-value literal with the data as the name
             const ref_text = try self.visit_generic(data, &node.children.?.items[0]);
             if (data[node.start] == '!') {
@@ -477,7 +486,7 @@ const Grammar = struct {
             }
         }
 
-        fn visit_quantified(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {
+        fn visit_quantified(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
             const child = try self.visit_generic(data, &node.children.?.items[0]);
             const q = &node.children.?.items[1].children.?.items[0];
             const q_char = data[q.start];
@@ -489,7 +498,7 @@ const Grammar = struct {
             return child;
         }
 
-        fn visit_label_regex(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {
+        fn visit_label_regex(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
             // Send back an empty-value literal with the label as the name
             if (data[node.start] == '!') {
                 return try self.grammar.createNot("", try self.grammar.createLiteral("", data[node.start + 1 .. node.end]));
@@ -498,7 +507,7 @@ const Grammar = struct {
             }
         }
 
-        fn visit_regex(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {
+        fn visit_regex(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
             const quoted_re = try self.visit_generic(data, &node.children.?.items[1]);
             const re = try self.grammar.createRegex(
                 "",
@@ -532,15 +541,15 @@ const Grammar = struct {
     }
 
     // Reduce boilerplate when manually constructing a grammar
-    fn createQuantity(self: *Grammar, name: []const u8, min: usize, max: usize, child: *const Expression) !*Expression {
+    fn createQuantity(self: *Grammar, name: []const u8, min: usize, max: usize, child: *Expression) !*Expression {
         return self.initExpression(name, .{ .quantity = Quantity{ .min = min, .max = max, .child = child } });
     }
 
-    fn createZeroOrMore(self: *Grammar, name: []const u8, child: *const Expression) !*Expression {
+    fn createZeroOrMore(self: *Grammar, name: []const u8, child: *Expression) !*Expression {
         return self.createQuantity(name, 0, std.math.maxInt(usize), child);
     }
 
-    fn createOneOrMore(self: *Grammar, name: []const u8, child: *const Expression) !*Expression {
+    fn createOneOrMore(self: *Grammar, name: []const u8, child: *Expression) !*Expression {
         return self.createQuantity(name, 1, std.math.maxInt(usize), child);
     }
 
@@ -552,11 +561,11 @@ const Grammar = struct {
         return self.initExpression(name, .{ .choice = Choice{ .children = childList } });
     }
 
-    fn createLookahead(self: *Grammar, name: []const u8, child: *const Expression) !*Expression {
+    fn createLookahead(self: *Grammar, name: []const u8, child: *Expression) !*Expression {
         return self.initExpression(name, .{ .lookahead = Lookahead{ .negative = false, .child = child } });
     }
 
-    fn createNot(self: *Grammar, name: []const u8, child: *const Expression) !*Expression {
+    fn createNot(self: *Grammar, name: []const u8, child: *Expression) !*Expression {
         return self.initExpression(name, .{ .lookahead = Lookahead{ .negative = true, .child = child } });
     }
 
@@ -582,7 +591,7 @@ const Grammar = struct {
     }
 
     pub fn bootstrap(self: *Grammar) !*Expression {
-        // Build a basic grammar for bootstrapping
+        // Parsimonious bootstraps itself, which is fun, but manually creating the grammar allows us to not have use references
         const ws = try self.createRegex("ws", "\\s+");
         const comment = try self.createRegex("comment", "#[^\r\n]*");
         const ignore = try self.createZeroOrMore("_ignore", try self.createChoice(
@@ -597,10 +606,16 @@ const Grammar = struct {
                 ignore,
             },
         );
+        const double_quoted_literal = try self.createRegex("",
+            \\"[^"\\]*(?:\\.[^"\\]*)*\"
+        );
+        const single_quoted_literal = try self.createRegex("",
+            \\'[^'\\]*(?:\\.[^'\\]*)*\'
+        );
         const quoted_literal = try self.createSequence(
             "quoted_literal",
             &[_]*Expression{
-                try self.createRegex("quoted_regex", "\"[^\"\\\\]*(?:\\\\.[^\"\\\\]*)*\""),
+                try self.createChoice("", &[_]*Expression{ double_quoted_literal, single_quoted_literal }),
                 ignore,
             },
         );
@@ -611,7 +626,12 @@ const Grammar = struct {
             quoted_literal,
             regex_exp,
         });
-        const quantifier = try self.createSequence("quantifier", &[_]*Expression{ try self.createRegex("", "[*+?]"), ignore });
+        const quantifier = try self.createSequence("quantifier", &[_]*Expression{
+            try self.createRegex("",
+                \\[*+?]|\{\d*,\d+\}|\{\d+,\d*\}|\{\d+\}
+            ),
+            ignore,
+        });
         const quantified = try self.createSequence("quantified", &[_]*Expression{ atom, quantifier });
         const term = try self.createChoice("term", &[_]*Expression{ quantified, atom });
         const term_plus = try self.createOneOrMore("term_plus", term); // deviation from parsimonious
@@ -635,58 +655,58 @@ const Grammar = struct {
 
         // Assign the rules to ourselves
         self.root = rules;
-        const rule_data =
-            \\# Ignored things (represented by _) are typically hung off the end of the
-            \\# leafmost kinds of nodes. Literals like "/" count as leaves.
-            \\
-            \\rules = _ rule*
-            \\rule = label equals expression
-            \\equals = "=" _
-            \\literal = quoted_literal _
-            \\
-            \\# So you can't spell a regex like `~"..." ilm`:
-            \\quoted_literal = ~"\"[^\"\\\\]*(?:\\\\.[^\"\\\\]*)*\"" / ~"'[^'\\\\]*(?:\\\\.[^'\\\\]*)*'"
-            \\
-            \\expression = ored / sequence / term
-            \\or_term = "/" _ term+
-            \\ored = term+ or_term+
-            \\sequence = term term+
-            \\not_term = "!" term _
-            \\lookahead_term = "&" term _
-            \\term = not_term / lookahead_term / quantified / atom
-            \\quantified = atom quantifier
-            \\atom = reference / literal / regex / parenthesized
-            \\regex = "~" quoted_literal ~"[ilmsuxa]*"i _
-            \\parenthesized = "(" _ expression ")" _
-            \\quantifier = ~"[*+?]|\{\d*,\d+\}|\{\d+,\d*\}|\{\d+\}" _
-            \\reference = label !equals
-            \\
-            \\# A subsequent equal sign is the only thing that distinguishes a label
-            \\# (which begins a new rule) from a reference (which is just a pointer to a
-            \\# rule defined somewhere else):
-            \\label = ~"[a-zA-Z_][a-zA-Z_0-9]*(?![\"'])" _
-            \\
-            \\
-            \\_ = meaninglessness*
-            \\meaninglessness = ~"\s+" / comment
-            \\comment = ~"#[^\r\n]*"
-        ;
-        //const rule_data =
-        //    \\reference = label !equals
-        //;
-        const n = try self.parse(rule_data);
-        //n.?.print(rule_data, 0);
-        var visitor = Grammar.BootStrapVisitor{
-            .grammar = self,
-            .allocator = self.allocator,
-            .visitorTable = std.StringHashMap(Grammar.BootStrapVisitor.BootStrapVisitorSignature).init(self.allocator),
-            .referenceStack = std.ArrayList([]const u8).init(self.allocator),
-        };
+        // const rule_data =
+        //     \\# Ignored things (represented by _) are typically hung off the end of the
+        //     \\# leafmost kinds of nodes. Literals like "/" count as leaves.
+        //     \\
+        //     \\rules = _ rule*
+        //     \\rule = label equals expression
+        //     \\equals = "=" _
+        //     \\literal = quoted_literal _
+        //     \\
+        //     \\# So you can't spell a regex like `~"..." ilm`:
+        //     \\quoted_literal = ~"\"[^\"\\\\]*(?:\\\\.[^\"\\\\]*)*\"" / ~"'[^'\\\\]*(?:\\\\.[^'\\\\]*)*'"
+        //     \\
+        //     \\expression = ored / sequence / term
+        //     \\or_term = "/" _ term+
+        //     \\ored = term+ or_term+
+        //     \\sequence = term term+
+        //     \\not_term = "!" term _
+        //     \\lookahead_term = "&" term _
+        //     \\term = not_term / lookahead_term / quantified / atom
+        //     \\quantified = atom quantifier
+        //     \\atom = reference / literal / regex / parenthesized
+        //     \\regex = "~" quoted_literal ~"[ilmsuxa]*"i _
+        //     \\parenthesized = "(" _ expression ")" _
+        //     \\quantifier = ~"[*+?]|\{\d*,\d+\}|\{\d+,\d*\}|\{\d+\}" _
+        //     \\reference = label !equals
+        //     \\
+        //     \\# A subsequent equal sign is the only thing that distinguishes a label
+        //     \\# (which begins a new rule) from a reference (which is just a pointer to a
+        //     \\# rule defined somewhere else):
+        //     \\label = ~"[a-zA-Z_][a-zA-Z_0-9]*(?![\"'])" _
+        //     \\
+        //     \\
+        //     \\_ = meaninglessness*
+        //     \\meaninglessness = ~"\s+" / comment
+        //     \\comment = ~"#[^\r\n]*"
+        // ;
+        // //const rule_data =
+        // //    \\reference = label !equals
+        // //;
+        // const n = try self.parse(rule_data);
+        // //n.?.print(rule_data, 0);
+        // var visitor = Grammar.BootStrapVisitor{
+        //     .grammar = self,
+        //     .allocator = self.allocator,
+        //     .visitorTable = std.StringHashMap(Grammar.BootStrapVisitor.BootStrapVisitorSignature).init(self.allocator),
+        //     .referenceStack = std.ArrayList([]const u8).init(self.allocator),
+        // };
 
-        // Bootstrap against the full rules
-        const root_expr = try visitor.visit(rule_data, &n.?);
-        self.root = root_expr;
-        return root_expr;
+        // // Bootstrap against the full rules
+        // const root_expr = try visitor.visit(rule_data, &n.?);
+        // self.root = root_expr;
+        return self.root;
     }
 
     // Return a tree of Nodes after parsing. Optionals are used to indicate if no match was found.
@@ -822,7 +842,9 @@ pub fn main() !void {
     n.?.print(my_grammar, 0);
 }
 
-const expect = std.testing.expect;
+/////////////
+// Testing
+/////////////
 
 // A very minimal output format, primarily for testing
 fn nodeToString(self: *const Node, output: *std.ArrayList(u8)) !void {
@@ -836,6 +858,49 @@ fn nodeToString(self: *const Node, output: *std.ArrayList(u8)) !void {
             try nodeToString(&c, output);
         }
         try output.append(']');
+    }
+}
+
+// A very minimal output format, primarily for testing
+fn expressionToString(self: *const Expression, output: *std.ArrayList(u8)) !void {
+    switch (self.*.matcher) {
+        .regex => {
+            try output.appendSlice("rx");
+        },
+        .literal => {
+            try output.appendSlice("l");
+        },
+        .reference => {
+            try output.appendSlice("rf");
+        },
+        .sequence => |s| {
+            try output.appendSlice("s[");
+            for (s.children.items) |c| {
+                expressionToString(c, output);
+            }
+            try output.append(']');
+        },
+        .choice => |s| {
+            try output.appendSlice("c[");
+            for (s.children.items) |c| {
+                expressionToString(c, output);
+            }
+            try output.append(']');
+        },
+        .quantity => |q| {
+            try output.appendSlice("q[");
+            expressionToString(q.child, output);
+            try output.append(']');
+        },
+        .lookahead => |l| {
+            if (l.negative) {
+                try output.appendSlice("n[");
+            } else {
+                try output.appendSlice("la[");
+            }
+            expressionToString(l.child, output);
+            try output.append(']');
+        },
     }
 }
 
@@ -909,7 +974,7 @@ test "expression parse fails" {
     };
     for (cases) |case| {
         const node = try grammar.parseWith(case.i, case.e);
-        try expect(node == null);
+        try std.testing.expect(node == null);
     }
 }
 
@@ -927,12 +992,17 @@ test "grammar parsing" {
         o: []const u8, // output
     }{
         .{ .i = "a = a", .o = "" },
+        .{ .i = "a = \"a\"", .o = "" },
+        .{ .i = "a = 'a'", .o = "" },
+        .{ .i = "a = !b", .o = "" },
+        .{ .i = "a = b{2,3}", .o = "" },
         .{ .i = "a = a b c", .o = "" },
         .{ .i = "a = a / b / c", .o = "" },
     };
     for (cases) |case| {
         const node = try grammar.parse(case.i);
         try nodeToString(&node.?, &nodeStr);
+        try std.testing.expectEqual(node.?.end, case.i.len);
         //try std.testing.expectEqualStrings(case.o, nodeStr.items);
         // reset
         try nodeStr.resize(0);

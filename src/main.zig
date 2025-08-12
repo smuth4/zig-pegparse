@@ -1,7 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const zig_pegparse = @import("zig_pegparse");
-//const regex = @import("regex");
 
 const regex = @cImport({
     @cDefine("PCRE2_CODE_UNIT_WIDTH", "8");
@@ -501,13 +500,13 @@ const Grammar = struct {
                 var max: usize = std.math.maxInt(usize);
                 if (std.mem.indexOfScalarPos(u8, data, q.start, ',')) |comma_pos| {
                     if (comma_pos != q.start + 1) {
-                        min = try std.fmt.parseInt(usize, data[q.start + 1 .. comma_pos], 0);
+                        min = try std.fmt.parseUnsigned(usize, data[q.start + 1 .. comma_pos], 10);
                     }
                     if (comma_pos + 1 != q.end - 1) {
-                        max = try std.fmt.parseInt(usize, data[comma_pos + 1 .. q.end - 1], 0);
+                        max = try std.fmt.parseUnsigned(usize, data[comma_pos + 1 .. q.end - 1], 10);
                     }
                 } else {
-                    min = try std.fmt.parseInt(usize, data[q.start + 1 .. q.end - 1], 0);
+                    min = try std.fmt.parseUnsigned(usize, data[q.start + 1 .. q.end - 1], 10);
                     max = min;
                 }
                 return self.grammar.createQuantity("", min, max, child.?);
@@ -639,7 +638,13 @@ const Grammar = struct {
                 ignore,
             },
         );
-        const regex_exp = try self.createSequence("regex", &[_]*Expression{ try self.createLiteral("", "~"), quoted_literal });
+        const regex_exp = try self.createSequence("regex", &[_]*Expression{
+            try self.createLiteral("", "~"),
+            quoted_literal,
+            try self.createRegex("", "[ilmsuxa]*"),
+            ignore,
+            //ignore,
+        });
         const reference = try self.createSequence("reference", &[_]*Expression{ label, try self.createNot("", equals) });
         const atom = try self.createChoice("atom", &[_]*Expression{
             reference,
@@ -737,17 +742,11 @@ const Grammar = struct {
             .regex => |r| {
                 //std.debug.print("parse regex name={s} value={s}\n", .{ exp.name, r.value });
                 if (find(r.re, toParse)) |result| {
-                    // Regexes are one of the only types that can
-                    // match 0-length nodes, ignore those
-                    if (result == 0) {
-                        return null;
-                    }
                     //std.debug.print("parse regex match: {s}\n", .{toParse[0..result]});
                     const old_pos = pos.*;
                     pos.* += result;
                     return Node{ .name = exp.name, .start = old_pos, .end = pos.* };
                 } else {
-                    //std.debug.print("parse fail name={s}\n", .{exp.name});
                     return null;
                 }
             },
@@ -943,10 +942,12 @@ test "expressions" {
         .{ .e = try grammar.createLiteral("", "test"), .i = "test", .o = "" },
         .{ .e = try grammar.createRegex("", "test"), .i = "test", .o = "" },
         .{ .e = try grammar.createRegex("", "\\s+"), .i = "     ", .o = "" },
+        .{ .e = try grammar.createRegex("", "\\s*"), .i = "", .o = "" },
         .{ .e = try grammar.createOneOrMore("", a), .i = "a", .o = "[a]" },
         .{ .e = try grammar.createOneOrMore("", a), .i = "aaa", .o = "[aaa]" },
         .{ .e = try grammar.createZeroOrMore("", a), .i = "", .o = "[]" },
         .{ .e = try grammar.createZeroOrMore("", a), .i = "aaa", .o = "[aaa]" },
+        .{ .e = try grammar.createZeroOrOne("", a), .i = "a", .o = "[a]" },
         .{ .e = try grammar.createSequence("", &[_]*Expression{a}), .i = "a", .o = "[a]" },
         .{ .e = try grammar.createSequence("", &[_]*Expression{ a, b }), .i = "ab", .o = "[ab]" },
         .{ .e = try grammar.createChoice("", &[_]*Expression{ a, b, c }), .i = "a", .o = "[a]" },
@@ -987,6 +988,7 @@ test "expression parse fails" {
         .{ .e = try grammar.createLiteral("", "test"), .i = "tes" },
         .{ .e = try grammar.createRegex("", "test"), .i = "tes" },
         .{ .e = try grammar.createRegex("", "\\s+"), .i = "test" },
+        .{ .e = try grammar.createZeroOrOne("", a), .i = "aaa" },
         .{ .e = try grammar.createOneOrMore("", b), .i = "" },
         .{ .e = try grammar.createOneOrMore("", c), .i = "!!!" },
         .{ .e = try grammar.createChoice("", &[_]*Expression{ a, b, c }), .i = "d" },
@@ -1012,8 +1014,10 @@ test "grammar parsing" {
         o: []const u8, // output
     }{
         .{ .i = "a = a", .o = "rf" },
+        .{ .i = "a = a # comment", .o = "rf" },
         .{ .i = "a = \"x\"", .o = "l" },
         .{ .i = "a = ~\"x\"", .o = "rx" },
+        .{ .i = "a = ~\"x\"i", .o = "rx" },
         .{ .i = "a = 'a'", .o = "l" },
         .{ .i = "a = !b", .o = "n[rf]" },
         .{ .i = "a = b*", .o = "q[rf]" },

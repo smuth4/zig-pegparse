@@ -344,7 +344,7 @@ const Grammar = struct {
         var pos: usize = 0;
         const n = try self.parseInner(root, data, &pos);
         if (pos != data.len) {
-            std.debug.print("did not reach end\n", .{});
+            //std.debug.print("did not reach end\n", .{});
             //n.?.print(data, 0);
             return null;
         }
@@ -376,9 +376,9 @@ const Grammar = struct {
             var rules = ExpressionList.init(self.allocator);
             const rulesNode = node.children.?.items[1];
             for (rulesNode.children.?.items) |child| {
-                std.debug.print("rule child: {s}\n", .{child.name});
+                //std.debug.print("rule child: {s}\n", .{child.name});
                 if (try self.visit_generic(data, &child)) |result| {
-                    self.grammar.printInner(&self.referenceStack, result, 0);
+                    //self.grammar.printInner(&self.referenceStack, result, 0);
                     try rules.append(result);
                 }
             }
@@ -430,7 +430,6 @@ const Grammar = struct {
             }
             for (node.children.?.items[1].children.?.items) |child| {
                 if (try self.visit_generic(data, &child)) |result| {
-                    std.debug.print("seq: {s}\n", .{result.name});
                     try exprs.append(result);
                 }
             }
@@ -479,7 +478,6 @@ const Grammar = struct {
         }
 
         fn visit_quantified(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {
-            node.print(data, 0);
             const child = try self.visit_generic(data, &node.children.?.items[0]);
             const q = &node.children.?.items[1].children.?.items[0];
             const q_char = data[q.start];
@@ -524,25 +522,13 @@ const Grammar = struct {
         }
         const result = try self.references.getOrPut(name);
         if (result.found_existing) {
-            std.debug.print("dupe: {s}\n", .{name});
+            //std.debug.print("dupe: {s}\n", .{name});
             return GrammarError.DuplicateLabel;
         } else {
-            std.debug.print("insert reference: {s}\n", .{name});
+            //std.debug.print("insert reference: {s}\n", .{name});
             result.value_ptr.* = expr;
         }
         return expr;
-    }
-
-    fn addExpression(self: *Grammar, name: []const u8, expr: *Expression) !void {
-        // Expressions with empty names can only be referenced directly, but we should either cache them if possible, or just create them with the allocator if not
-        std.debug.print("insert: {s}\n", .{name});
-        const result = try self.references.getOrPut(name);
-        if (result.found_existing) {
-            std.debug.print("dupe: {s}\n", .{name});
-            return GrammarError.DuplicateLabel;
-        } else {
-            result.value_ptr.* = expr;
-        }
     }
 
     // Reduce boilerplate when manually constructing a grammar
@@ -571,7 +557,6 @@ const Grammar = struct {
     }
 
     fn createNot(self: *Grammar, name: []const u8, child: *const Expression) !*Expression {
-        std.debug.print("createNot: {s}\n", .{name});
         return self.initExpression(name, .{ .lookahead = Lookahead{ .negative = true, .child = child } });
     }
 
@@ -690,7 +675,7 @@ const Grammar = struct {
         //    \\reference = label !equals
         //;
         const n = try self.parse(rule_data);
-        n.?.print(rule_data, 0);
+        //n.?.print(rule_data, 0);
         var visitor = Grammar.BootStrapVisitor{
             .grammar = self,
             .allocator = self.allocator,
@@ -707,27 +692,27 @@ const Grammar = struct {
     // Return a tree of Nodes after parsing. Optionals are used to indicate if no match was found.
     fn parseInner(self: *Grammar, exp: *const Expression, data: []const u8, pos: *usize) !?Node {
         const toParse = data[pos.*..];
-        std.debug.print("remaining: {s}\n", .{toParse});
+        //std.debug.print("remaining: {s}\n", .{toParse});
         switch (exp.*.matcher) {
             .regex => |r| {
-                std.debug.print("parse regex name={s} value={s}\n", .{ exp.name, r.value });
+                //std.debug.print("parse regex name={s} value={s}\n", .{ exp.name, r.value });
                 if (find(r.re, toParse)) |result| {
                     // Regexes are one of the only types that can
                     // match 0-length nodes, ignore those
                     if (result == 0) {
                         return null;
                     }
-                    std.debug.print("parse regex match: {s}\n", .{toParse[0..result]});
+                    //std.debug.print("parse regex match: {s}\n", .{toParse[0..result]});
                     const old_pos = pos.*;
                     pos.* += result;
                     return Node{ .name = exp.name, .start = old_pos, .end = pos.* };
                 } else {
-                    std.debug.print("parse fail name={s}\n", .{exp.name});
+                    //std.debug.print("parse fail name={s}\n", .{exp.name});
                     return null;
                 }
             },
             .literal => |l| {
-                std.debug.print("parse literal value={s}\n", .{l.value});
+                //std.debug.print("parse literal value={s}\n", .{l.value});
                 if (std.mem.startsWith(u8, toParse, l.value)) {
                     const old_pos = pos.*;
                     pos.* += l.value.len;
@@ -735,14 +720,14 @@ const Grammar = struct {
                 }
             },
             .reference => |r| {
-                std.debug.print("parse reference target={s}\n", .{r.target});
+                //std.debug.print("parse reference target={s}\n", .{r.target});
                 if (self.references.get(r.target)) |ref| {
                     return self.parseInner(ref, data, pos);
                 }
             },
             .sequence => |s| {
                 // TODO: deinit on failure?
-                std.debug.print("parse sequence name={s}\n", .{exp.name});
+                //std.debug.print("parse sequence name={s}\n", .{exp.name});
                 var children = std.ArrayList(Node).init(self.allocator);
                 const old_pos = pos.*;
                 for (s.children.items) |c| {
@@ -757,24 +742,24 @@ const Grammar = struct {
             },
             .choice => |s| {
                 // TODO: deinit on failure?
-                std.debug.print("parse choice name={s}\n", .{exp.name});
+                //std.debug.print("parse choice name={s}\n", .{exp.name});
                 var children = std.ArrayList(Node).init(self.allocator);
                 const old_pos = pos.*;
                 for (s.children.items) |c| {
                     if (try self.parseInner(c, data, pos)) |n| {
-                        std.debug.print("parse choice name={s} matched node {s}\n", .{ exp.name, n.name });
+                        //std.debug.print("parse choice name={s} matched node {s}\n", .{ exp.name, n.name });
                         try children.append(n);
                         return Node{ .name = exp.name, .start = old_pos, .end = pos.*, .children = children };
                     } else {
-                        std.debug.print("parse choice name={s} failed child {s}\n", .{ exp.name, c.name });
+                        //std.debug.print("parse choice name={s} failed child {s}\n", .{ exp.name, c.name });
                         pos.* = old_pos;
                     }
                 }
-                std.debug.print("parse choice name={s} failed\n", .{exp.name});
+                //std.debug.print("parse choice name={s} failed\n", .{exp.name});
                 return null;
             },
             .lookahead => |l| {
-                std.debug.print("parse lookahead name={s}\n", .{exp.name});
+                //std.debug.print("parse lookahead name={s}\n", .{exp.name});
                 const old_pos = pos.*;
                 const parsedNode = try self.parseInner(l.child, data, pos);
                 const new_pos = pos.*;
@@ -790,20 +775,20 @@ const Grammar = struct {
                 }
             },
             .quantity => |q| {
-                std.debug.print("parse quantity name={s}\n", .{exp.name});
+                //std.debug.print("parse quantity name={s}\n", .{exp.name});
                 var children = std.ArrayList(Node).init(self.allocator);
                 const old_pos = pos.*;
-                std.debug.print("quant start: {s}\n", .{exp.name});
+                //std.debug.print("quant start: {s}\n", .{exp.name});
                 while (children.items.len < q.max and pos.* < data.len) {
                     const parsedNode = try self.parseInner(q.child, data, pos) orelse break;
                     try children.append(parsedNode);
-                    std.debug.print("quant good child: {s}\n", .{parsedNode.name});
+                    //std.debug.print("quant good child: {s}\n", .{parsedNode.name});
                     if (children.items.len >= q.min and parsedNode.start == parsedNode.end) {
                         break;
                     }
                 }
                 if (children.items.len >= q.min) {
-                    std.debug.print("quant success size: {s} {d}\n", .{ exp.name, children.items.len });
+                    //std.debug.print("quant success size: {s} {d}\n", .{ exp.name, children.items.len });
                     return Node{ .name = exp.name, .start = old_pos, .end = pos.*, .children = children };
                 } else {
                     pos.* = old_pos;

@@ -627,10 +627,10 @@ const Grammar = struct {
             },
         );
         const double_quoted_literal = try self.createRegex("",
-            \\"[^"\\]*(?:\\.[^"\\]*)*\"
+            \\"[^"\\]*(?:\\.[^"\\]*)*"
         );
         const single_quoted_literal = try self.createRegex("",
-            \\'[^'\\]*(?:\\.[^'\\]*)*\'
+            \\'[^'\\]*(?:\\.[^'\\]*)*'
         );
         const quoted_literal = try self.createSequence(
             "quoted_literal",

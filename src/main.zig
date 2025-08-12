@@ -13,7 +13,7 @@ const Node = struct {
     name: []const u8,
     start: usize,
     end: usize,
-    children: ?NodeList = null, // null here means a leaf node, TODO: does this really save anything over a empty list?
+    children: ?NodeList = null, // null here means a leaf node
 
     fn print(self: *const Node, data: []const u8, i: u32) void {
         indent(i);
@@ -337,10 +337,15 @@ const Grammar = struct {
 
     // Parse pre-loaded data according to the grammar
     pub fn parse(self: *Grammar, data: []const u8) !?Node {
+        return self.parseWith(data, self.root);
+    }
+
+    pub fn parseWith(self: *Grammar, data: []const u8, root: *Expression) !?Node {
         var pos: usize = 0;
-        const n = try self.parseInner(self.root, data, &pos);
+        const n = try self.parseInner(root, data, &pos);
         if (pos != data.len) {
             std.debug.print("did not reach end\n", .{});
+            //n.?.print(data, 0);
             return null;
         }
         return n;
@@ -348,6 +353,7 @@ const Grammar = struct {
 
     // Needs to have access to the grammaer's reference table, but
     // ideally a reference for any visitor implementations
+    // TODO: This was fun, but is probably better off manually constructed
     const BootStrapVisitor = struct {
         const BootStrapVisitorSignature = *const fn (self: *BootStrapVisitor, data: []const u8, node: *const Node) anyerror!?*Expression;
         visitorTable: std.StringHashMap(BootStrapVisitorSignature),
@@ -424,6 +430,7 @@ const Grammar = struct {
             }
             for (node.children.?.items[1].children.?.items) |child| {
                 if (try self.visit_generic(data, &child)) |result| {
+                    std.debug.print("seq: {s}\n", .{result.name});
                     try exprs.append(result);
                 }
             }
@@ -433,7 +440,10 @@ const Grammar = struct {
 
         fn visit_ored(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {
             var exprs = ExpressionList.init(self.allocator);
-            for (node.children.?.items) |child| {
+            if (try self.visit_generic(data, &node.children.?.items[0])) |result| {
+                try exprs.append(result);
+            }
+            for (node.children.?.items[1].children.?.items) |child| {
                 if (try self.visit_generic(data, &child)) |result| {
                     try exprs.append(result);
                 }
@@ -461,19 +471,22 @@ const Grammar = struct {
         fn visit_reference(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {
             // Send back an empty-value literal with the data as the name
             const ref_text = try self.visit_generic(data, &node.children.?.items[0]);
-            return try self.grammar.createReference("", getLiteralValue(ref_text.?));
+            if (data[node.start] == '!') {
+                return try self.grammar.createNot("", try self.grammar.createReference("", getLiteralValue(ref_text.?)));
+            } else {
+                return try self.grammar.createReference("", getLiteralValue(ref_text.?));
+            }
         }
 
         fn visit_quantified(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {
-            // Only supports * for bootstrapping
+            node.print(data, 0);
             const child = try self.visit_generic(data, &node.children.?.items[0]);
-            const q = try self.visit_generic(data, &node.children.?.items[1]);
-            if (q) |good_q| {
-                if (getLiteralValue(good_q)[0] == '*') {
-                    return try self.grammar.createZeroOrMore("", child.?);
-                } else if (getLiteralValue(good_q)[0] == '+') {
-                    return try self.grammar.createOneOrMore("", child.?);
-                }
+            const q = &node.children.?.items[1].children.?.items[0];
+            const q_char = data[q.start];
+            if (q_char == '*') {
+                return try self.grammar.createZeroOrMore("", child.?);
+            } else if (q_char == '+') {
+                return try self.grammar.createOneOrMore("", child.?);
             }
             return child;
         }
@@ -482,8 +495,9 @@ const Grammar = struct {
             // Send back an empty-value literal with the label as the name
             if (data[node.start] == '!') {
                 return try self.grammar.createNot("", try self.grammar.createLiteral("", data[node.start + 1 .. node.end]));
+            } else {
+                return try self.grammar.createLiteral("", data[node.start..node.end]);
             }
-            return try self.grammar.createLiteral("", data[node.start..node.end]);
         }
 
         fn visit_regex(self: *BootStrapVisitor, data: []const u8, node: *const Node) !?*Expression {
@@ -557,6 +571,7 @@ const Grammar = struct {
     }
 
     fn createNot(self: *Grammar, name: []const u8, child: *const Expression) !*Expression {
+        std.debug.print("createNot: {s}\n", .{name});
         return self.initExpression(name, .{ .lookahead = Lookahead{ .negative = true, .child = child } });
     }
 
@@ -623,7 +638,6 @@ const Grammar = struct {
         });
         const ored = try self.createSequence("ored", &[_]*Expression{
             term_plus,
-            ignore,
             try self.createOneOrMore("or_term_plus", or_term),
         });
         const expression = try self.createChoice("expression", &[_]*Expression{ ored, sequence, term });
@@ -636,8 +650,6 @@ const Grammar = struct {
 
         // Assign the rules to ourselves
         self.root = rules;
-        self.print();
-        //self.root.print(0);
         const rule_data =
             \\# Ignored things (represented by _) are typically hung off the end of the
             \\# leafmost kinds of nodes. Literals like "/" count as leaves.
@@ -645,11 +657,10 @@ const Grammar = struct {
             \\rules = _ rule*
             \\rule = label equals expression
             \\equals = "=" _
-            \\literal = spaceless_literal _
+            \\literal = quoted_literal _
             \\
             \\# So you can't spell a regex like `~"..." ilm`:
-            \\spaceless_literal = ~"\"[^\"\\\\]*(?:\\\\.[^\"\\\\]*)*\""is /
-            \\                    ~"'[^'\\\\]*(?:\\\\.[^'\\\\]*)*'"is
+            \\quoted_literal = ~"\"[^\"\\\\]*(?:\\\\.[^\"\\\\]*)*\"" / ~"'[^'\\\\]*(?:\\\\.[^'\\\\]*)*'"
             \\
             \\expression = ored / sequence / term
             \\or_term = "/" _ term+
@@ -660,7 +671,7 @@ const Grammar = struct {
             \\term = not_term / lookahead_term / quantified / atom
             \\quantified = atom quantifier
             \\atom = reference / literal / regex / parenthesized
-            \\regex = "~" spaceless_literal ~"[ilmsuxa]*"i _
+            \\regex = "~" quoted_literal ~"[ilmsuxa]*"i _
             \\parenthesized = "(" _ expression ")" _
             \\quantifier = ~"[*+?]|\{\d*,\d+\}|\{\d+,\d*\}|\{\d+\}" _
             \\reference = label !equals
@@ -676,7 +687,7 @@ const Grammar = struct {
             \\comment = ~"#[^\r\n]*"
         ;
         //const rule_data =
-        //    \\rule = label equals expression
+        //    \\reference = label !equals
         //;
         const n = try self.parse(rule_data);
         n.?.print(rule_data, 0);
@@ -699,23 +710,24 @@ const Grammar = struct {
         std.debug.print("remaining: {s}\n", .{toParse});
         switch (exp.*.matcher) {
             .regex => |r| {
-                std.debug.print("regex name={s}\n", .{exp.name});
+                std.debug.print("parse regex name={s} value={s}\n", .{ exp.name, r.value });
                 if (find(r.re, toParse)) |result| {
                     // Regexes are one of the only types that can
                     // match 0-length nodes, ignore those
                     if (result == 0) {
                         return null;
                     }
-                    std.debug.print("regex match: {s}\n", .{toParse[0..result]});
+                    std.debug.print("parse regex match: {s}\n", .{toParse[0..result]});
                     const old_pos = pos.*;
                     pos.* += result;
                     return Node{ .name = exp.name, .start = old_pos, .end = pos.* };
                 } else {
+                    std.debug.print("parse fail name={s}\n", .{exp.name});
                     return null;
                 }
             },
             .literal => |l| {
-                std.debug.print("literal value={s}\n", .{l.value});
+                std.debug.print("parse literal value={s}\n", .{l.value});
                 if (std.mem.startsWith(u8, toParse, l.value)) {
                     const old_pos = pos.*;
                     pos.* += l.value.len;
@@ -723,13 +735,14 @@ const Grammar = struct {
                 }
             },
             .reference => |r| {
-                std.debug.print("reference target={s}\n", .{r.target});
+                std.debug.print("parse reference target={s}\n", .{r.target});
                 if (self.references.get(r.target)) |ref| {
                     return self.parseInner(ref, data, pos);
                 }
             },
             .sequence => |s| {
                 // TODO: deinit on failure?
+                std.debug.print("parse sequence name={s}\n", .{exp.name});
                 var children = std.ArrayList(Node).init(self.allocator);
                 const old_pos = pos.*;
                 for (s.children.items) |c| {
@@ -744,30 +757,40 @@ const Grammar = struct {
             },
             .choice => |s| {
                 // TODO: deinit on failure?
+                std.debug.print("parse choice name={s}\n", .{exp.name});
                 var children = std.ArrayList(Node).init(self.allocator);
                 const old_pos = pos.*;
                 for (s.children.items) |c| {
                     if (try self.parseInner(c, data, pos)) |n| {
+                        std.debug.print("parse choice name={s} matched node {s}\n", .{ exp.name, n.name });
                         try children.append(n);
                         return Node{ .name = exp.name, .start = old_pos, .end = pos.*, .children = children };
                     } else {
+                        std.debug.print("parse choice name={s} failed child {s}\n", .{ exp.name, c.name });
                         pos.* = old_pos;
                     }
                 }
+                std.debug.print("parse choice name={s} failed\n", .{exp.name});
                 return null;
             },
             .lookahead => |l| {
+                std.debug.print("parse lookahead name={s}\n", .{exp.name});
                 const old_pos = pos.*;
                 const parsedNode = try self.parseInner(l.child, data, pos);
                 const new_pos = pos.*;
                 pos.* = old_pos; // Always roll back the position
                 if (parsedNode) |_| {
-                    return if (l.negative) null else Node{ .name = exp.name, .start = old_pos, .end = new_pos };
+                    if (l.negative) {
+                        return null;
+                    } else {
+                        return Node{ .name = exp.name, .start = old_pos, .end = new_pos };
+                    }
                 } else {
                     return if (!l.negative) null else Node{ .name = exp.name, .start = old_pos, .end = new_pos };
                 }
             },
             .quantity => |q| {
+                std.debug.print("parse quantity name={s}\n", .{exp.name});
                 var children = std.ArrayList(Node).init(self.allocator);
                 const old_pos = pos.*;
                 std.debug.print("quant start: {s}\n", .{exp.name});
@@ -804,11 +827,129 @@ pub fn main() !void {
     _ = try g.bootstrap();
     std.debug.print("bootstrapped\n", .{});
     g.print();
+    const my_grammar =
+        \\bold_text  = bold_open text bold_close
+        \\text       = ~"[A-Z 0-9]*"
+        \\bold_open  = "(("
+        \\bold_close = "))"
+    ;
+    const n = try g.parse(my_grammar);
+    n.?.print(my_grammar, 0);
 }
 
-test "quant test" {
-    var list = std.ArrayList(i32).init(std.testing.allocator);
-    defer list.deinit(); // Try commenting this out and see if zig detects the memory leak!
-    try list.append(42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
+const expect = std.testing.expect;
+
+// A very minimal output format, primarily for testing
+fn nodeToString(self: *const Node, output: *std.ArrayList(u8)) !void {
+    if (self.name.len > 0 and self.name[0] == '_') {
+        return;
+    }
+    try output.appendSlice(self.name);
+    if (self.children) |children| {
+        try output.append('[');
+        for (children.items) |c| {
+            try nodeToString(&c, output);
+        }
+        try output.append(']');
+    }
+}
+
+test "expressions" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var grammar = Grammar.init(allocator);
+    // Create a few labels ahead of time to avoid dupes
+    const a = try grammar.createLiteral("a", "a");
+    const b = try grammar.createLiteral("b", "b");
+    const c = try grammar.createLiteral("c", "c");
+    const cases = &[_]struct {
+        e: *Expression,
+        i: []const u8, // input
+        o: []const u8, // output from nodes' toString
+    }{
+        .{ .e = try grammar.createLiteral("", "="), .i = "=", .o = "" },
+        .{ .e = try grammar.createLiteral("", "test"), .i = "test", .o = "" },
+        .{ .e = try grammar.createRegex("", "test"), .i = "test", .o = "" },
+        .{ .e = try grammar.createRegex("", "\\s+"), .i = "     ", .o = "" },
+        .{ .e = try grammar.createOneOrMore("", a), .i = "a", .o = "[a]" },
+        .{ .e = try grammar.createOneOrMore("", a), .i = "aaa", .o = "[aaa]" },
+        .{ .e = try grammar.createZeroOrMore("", a), .i = "", .o = "[]" },
+        .{ .e = try grammar.createZeroOrMore("", a), .i = "aaa", .o = "[aaa]" },
+        .{ .e = try grammar.createSequence("", &[_]*Expression{a}), .i = "a", .o = "[a]" },
+        .{ .e = try grammar.createSequence("", &[_]*Expression{ a, b }), .i = "ab", .o = "[ab]" },
+        .{ .e = try grammar.createChoice("", &[_]*Expression{ a, b, c }), .i = "a", .o = "[a]" },
+        .{ .e = try grammar.createChoice("", &[_]*Expression{ a, b, c }), .i = "b", .o = "[b]" },
+        .{ .e = try grammar.createChoice("", &[_]*Expression{ a, b, c }), .i = "c", .o = "[c]" },
+        .{ .e = try grammar.createReference("", "a"), .i = "a", .o = "a" },
+        .{ .e = try grammar.createSequence("", &[_]*Expression{ a, try grammar.createNot("", b) }), .i = "a", .o = "[a]" },
+        .{ .e = try grammar.createSequence("", &[_]*Expression{ a, try grammar.createNot("", b), c }), .i = "ac", .o = "[ac]" },
+        .{ .e = try grammar.createSequence("", &[_]*Expression{ a, try grammar.createLookahead("", b), b }), .i = "ab", .o = "[ab]" },
+    };
+    var nodeStr = std.ArrayList(u8).init(allocator);
+    defer nodeStr.deinit();
+    for (cases) |case| {
+        const node = try grammar.parseWith(case.i, case.e);
+        try nodeToString(&node.?, &nodeStr);
+        try std.testing.expectEqualStrings(case.o, nodeStr.items);
+        // reset
+        try nodeStr.resize(0);
+    }
+}
+
+test "expression parse fails" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var grammar = Grammar.init(allocator);
+    // Create a few labels ahead of time to avoid dupes
+    const a = try grammar.createLiteral("a", "a");
+    const b = try grammar.createLiteral("b", "b");
+    const c = try grammar.createLiteral("c", "c");
+    const cases = &[_]struct {
+        e: *Expression,
+        i: []const u8, // input
+    }{
+        .{ .e = a, .i = "!" },
+        .{ .e = try grammar.createLiteral("", "test"), .i = "test2" },
+        .{ .e = try grammar.createLiteral("", "test"), .i = "tes" },
+        .{ .e = try grammar.createRegex("", "test"), .i = "tes" },
+        .{ .e = try grammar.createRegex("", "\\s+"), .i = "test" },
+        .{ .e = try grammar.createOneOrMore("", b), .i = "" },
+        .{ .e = try grammar.createOneOrMore("", c), .i = "!!!" },
+        .{ .e = try grammar.createChoice("", &[_]*Expression{ a, b, c }), .i = "d" },
+        .{ .e = try grammar.createSequence("", &[_]*Expression{ a, b }), .i = "ad" },
+    };
+    for (cases) |case| {
+        const node = try grammar.parseWith(case.i, case.e);
+        try expect(node == null);
+    }
+}
+
+test "grammar parsing" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var grammar = Grammar.init(allocator);
+    _ = try grammar.bootstrap();
+    var nodeStr = std.ArrayList(u8).init(allocator);
+    defer nodeStr.deinit();
+    const cases = &[_]struct {
+        i: []const u8, // input
+        o: []const u8, // output
+    }{
+        .{ .i = "a = a", .o = "" },
+        .{ .i = "a = a b c", .o = "" },
+        .{ .i = "a = a / b / c", .o = "" },
+    };
+    for (cases) |case| {
+        const node = try grammar.parse(case.i);
+        try nodeToString(&node.?, &nodeStr);
+        //try std.testing.expectEqualStrings(case.o, nodeStr.items);
+        // reset
+        try nodeStr.resize(0);
+    }
 }

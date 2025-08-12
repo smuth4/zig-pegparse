@@ -351,15 +351,18 @@ const Grammar = struct {
         return n;
     }
 
-    pub fn createGrammar(self: *Grammar, data: []const u8) Grammar {
+    // Parse a string and turn it into a new grammar
+    pub fn createGrammar(self: *Grammar, data: []const u8) !Grammar {
         var grammar = Grammar.init(self.allocator);
         var visitor = Grammar.ExpressionVisitor{
             .grammar = &grammar,
             .allocator = self.allocator,
-            .visitorTable = std.StringHashMap(Grammar.ExpressionVisitor.ExpressionVisitorSignature),
+            .visitorTable = std.StringHashMap(Grammar.ExpressionVisitor.ExpressionVisitorSignature).init(self.allocator),
             .referenceStack = std.ArrayList([]const u8).init(self.allocator),
         };
-        visitor.vist(self.parse(data));
+        const rootNode = try self.parse(data);
+        try visitor.visit(data, &rootNode.?);
+        return grammar;
     }
 
     /// Converts a node tree into a full grammar
@@ -376,7 +379,7 @@ const Grammar = struct {
             try self.visitorTable.put("regex", &ExpressionVisitor.visit_regex);
             try self.visitorTable.put("rule", &ExpressionVisitor.visit_rule);
             try self.visitorTable.put("label_regex", &ExpressionVisitor.visit_label_regex);
-            try self.visitorTable.put("quoted_regex", &ExpressionVisitor.visit_quoted_regex);
+            try self.visitorTable.put("quoted_literal", &ExpressionVisitor.visit_quoted_literal);
             try self.visitorTable.put("sequence", &ExpressionVisitor.visit_sequence);
             try self.visitorTable.put("ored", &ExpressionVisitor.visit_ored);
             try self.visitorTable.put("reference", &ExpressionVisitor.visit_reference);
@@ -471,7 +474,7 @@ const Grammar = struct {
             return null;
         }
 
-        fn visit_quoted_regex(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
+        fn visit_quoted_literal(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
             // Send back an empty-value literal with the data as the name
             return try self.grammar.createLiteral("", data[(node.start + 1)..(node.end - 1)]);
         }
@@ -487,15 +490,31 @@ const Grammar = struct {
         }
 
         fn visit_quantified(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
-            const child = try self.visit_generic(data, &node.children.?.items[0]);
-            const q = &node.children.?.items[1].children.?.items[0];
+            const child = try self.visit_generic(data, &node.children.?.items[0]); // Must be a literal
+            const q = &node.children.?.items[1].children.?.items[0]; // Quantifier string
             const q_char = data[q.start];
             if (q_char == '*') {
                 return try self.grammar.createZeroOrMore("", child.?);
+            } else if (q_char == '?') {
+                return try self.grammar.createZeroOrOne("", child.?);
             } else if (q_char == '+') {
                 return try self.grammar.createOneOrMore("", child.?);
+            } else {
+                var min: usize = 0;
+                var max: usize = std.math.maxInt(usize);
+                if (std.mem.indexOfScalarPos(u8, data, q.start, ',')) |comma_pos| {
+                    if (comma_pos != q.start + 1) {
+                        min = try std.fmt.parseInt(usize, data[q.start + 1 .. comma_pos], 0);
+                    }
+                    if (comma_pos + 1 != q.end - 1) {
+                        max = try std.fmt.parseInt(usize, data[comma_pos + 1 .. q.end - 1], 0);
+                    }
+                } else {
+                    min = try std.fmt.parseInt(usize, data[q.start + 1 .. q.end - 1], 0);
+                    max = min;
+                }
+                return self.grammar.createQuantity("", min, max, child.?);
             }
-            return child;
         }
 
         fn visit_label_regex(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
@@ -543,6 +562,10 @@ const Grammar = struct {
     // Reduce boilerplate when manually constructing a grammar
     fn createQuantity(self: *Grammar, name: []const u8, min: usize, max: usize, child: *Expression) !*Expression {
         return self.initExpression(name, .{ .quantity = Quantity{ .min = min, .max = max, .child = child } });
+    }
+
+    fn createZeroOrOne(self: *Grammar, name: []const u8, child: *Expression) !*Expression {
+        return self.createQuantity(name, 0, 1, child);
     }
 
     fn createZeroOrMore(self: *Grammar, name: []const u8, child: *Expression) !*Expression {
@@ -876,20 +899,20 @@ fn expressionToString(self: *const Expression, output: *std.ArrayList(u8)) !void
         .sequence => |s| {
             try output.appendSlice("s[");
             for (s.children.items) |c| {
-                expressionToString(c, output);
+                try expressionToString(c, output);
             }
             try output.append(']');
         },
         .choice => |s| {
             try output.appendSlice("c[");
             for (s.children.items) |c| {
-                expressionToString(c, output);
+                try expressionToString(c, output);
             }
             try output.append(']');
         },
         .quantity => |q| {
             try output.appendSlice("q[");
-            expressionToString(q.child, output);
+            try expressionToString(q.child, output);
             try output.append(']');
         },
         .lookahead => |l| {
@@ -898,7 +921,7 @@ fn expressionToString(self: *const Expression, output: *std.ArrayList(u8)) !void
             } else {
                 try output.appendSlice("la[");
             }
-            expressionToString(l.child, output);
+            try expressionToString(l.child, output);
             try output.append(']');
         },
     }
@@ -985,26 +1008,35 @@ test "grammar parsing" {
     const allocator = arena.allocator();
     var grammar = Grammar.init(allocator);
     _ = try grammar.bootstrap();
-    var nodeStr = std.ArrayList(u8).init(allocator);
-    defer nodeStr.deinit();
+    var exprStr = std.ArrayList(u8).init(allocator);
+    defer exprStr.deinit();
     const cases = &[_]struct {
         i: []const u8, // input
         o: []const u8, // output
     }{
-        .{ .i = "a = a", .o = "" },
-        .{ .i = "a = \"a\"", .o = "" },
-        .{ .i = "a = 'a'", .o = "" },
-        .{ .i = "a = !b", .o = "" },
-        .{ .i = "a = b{2,3}", .o = "" },
-        .{ .i = "a = a b c", .o = "" },
-        .{ .i = "a = a / b / c", .o = "" },
+        .{ .i = "a = a", .o = "rf" },
+        .{ .i = "a = \"x\"", .o = "l" },
+        .{ .i = "a = ~\"x\"", .o = "rx" },
+        .{ .i = "a = 'a'", .o = "l" },
+        .{ .i = "a = !b", .o = "n[rf]" },
+        .{ .i = "a = b*", .o = "q[rf]" },
+        .{ .i = "a = \"x\"*", .o = "q[l]" },
+        .{ .i = "a = b+", .o = "q[rf]" },
+        .{ .i = "a = b?", .o = "q[rf]" },
+        .{ .i = "a = b{2,3}", .o = "q[rf]" },
+        .{ .i = "a = b{2,}", .o = "q[rf]" },
+        .{ .i = "a = b{,3}", .o = "q[rf]" },
+        .{ .i = "a = b{3}", .o = "q[rf]" },
+        .{ .i = "a = a b c", .o = "s[rfrfrf]" },
+        .{ .i = "a = a / b / c", .o = "c[rfrfrf]" },
     };
     for (cases) |case| {
         const node = try grammar.parse(case.i);
-        try nodeToString(&node.?, &nodeStr);
         try std.testing.expectEqual(node.?.end, case.i.len);
-        //try std.testing.expectEqualStrings(case.o, nodeStr.items);
+        const new_grammar = try grammar.createGrammar(case.i);
+        try expressionToString(new_grammar.root, &exprStr);
+        try std.testing.expectEqualStrings(case.o, exprStr.items);
         // reset
-        try nodeStr.resize(0);
+        try exprStr.resize(0);
     }
 }

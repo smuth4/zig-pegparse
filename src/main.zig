@@ -10,6 +10,7 @@ const regex = @cImport({
 const NodeList = std.ArrayList(Node);
 const Node = struct {
     name: []const u8,
+    // Corresponds with the data used to the create the node, which the node isn't actually aware of
     start: usize,
     end: usize,
     children: ?NodeList = null, // null here means a leaf node
@@ -338,10 +339,8 @@ const Grammar = struct {
 
     pub fn parseWith(self: *Grammar, data: []const u8, root: *Expression) !?Node {
         var pos: usize = 0;
-        const n = try self.parseInner(root, data, &pos);
+        const n = try self.match(root, data, &pos);
         if (pos != data.len) {
-            //std.debug.print("did not reach end\n", .{});
-            //n.?.print(data, 0);
             return null;
         }
         return n;
@@ -760,7 +759,7 @@ const Grammar = struct {
     }
 
     // Return a tree of Nodes after parsing. Optionals are used to indicate if no match was found.
-    fn parseInner(self: *Grammar, exp: *const Expression, data: []const u8, pos: *usize) !?Node {
+    pub fn match(self: *Grammar, exp: *const Expression, data: []const u8, pos: *usize) !?Node {
         const toParse = data[pos.*..];
         //std.debug.print("remaining: {s}\n", .{toParse});
         switch (exp.*.matcher) {
@@ -785,7 +784,7 @@ const Grammar = struct {
             .reference => |r| {
                 //std.debug.print("parse reference target={s}\n", .{r.target});
                 if (self.references.get(r.target)) |ref| {
-                    return self.parseInner(ref, data, pos);
+                    return self.match(ref, data, pos);
                 }
             },
             .sequence => |s| {
@@ -794,7 +793,7 @@ const Grammar = struct {
                 var children = std.ArrayList(Node).init(self.allocator);
                 const old_pos = pos.*;
                 for (s.children.items) |c| {
-                    if (try self.parseInner(c, data, pos)) |n| {
+                    if (try self.match(c, data, pos)) |n| {
                         try children.append(n);
                     } else {
                         pos.* = old_pos;
@@ -809,7 +808,7 @@ const Grammar = struct {
                 var children = std.ArrayList(Node).init(self.allocator);
                 const old_pos = pos.*;
                 for (s.children.items) |c| {
-                    if (try self.parseInner(c, data, pos)) |n| {
+                    if (try self.match(c, data, pos)) |n| {
                         //std.debug.print("parse choice name={s} matched node {s}\n", .{ exp.name, n.name });
                         try children.append(n);
                         return Node{ .name = exp.name, .start = old_pos, .end = pos.*, .children = children };
@@ -824,7 +823,7 @@ const Grammar = struct {
             .lookahead => |l| {
                 //std.debug.print("parse lookahead name={s}\n", .{exp.name});
                 const old_pos = pos.*;
-                const parsedNode = try self.parseInner(l.child, data, pos);
+                const parsedNode = try self.match(l.child, data, pos);
                 const new_pos = pos.*;
                 pos.* = old_pos; // Always roll back the position
                 if (parsedNode) |_| {
@@ -843,7 +842,7 @@ const Grammar = struct {
                 const old_pos = pos.*;
                 //std.debug.print("quant start: {s}\n", .{exp.name});
                 while (children.items.len < q.max and pos.* < data.len) {
-                    const parsedNode = try self.parseInner(q.child, data, pos) orelse break;
+                    const parsedNode = try self.match(q.child, data, pos) orelse break;
                     try children.append(parsedNode);
                     //std.debug.print("quant good child: {s}\n", .{parsedNode.name});
                     if (children.items.len >= q.min and parsedNode.start == parsedNode.end) {

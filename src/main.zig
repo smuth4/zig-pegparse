@@ -1092,7 +1092,7 @@ test "grammar parsing" {
         .{ .i = "a = a / b / c", .o = "c[rfrfrf]" },
         .{ .i = "a = ( a b c )", .o = "s[rfrfrf]" },
 
-        .{ .i = "a = a ( a / c )", .o = "s[rfrfrf]" },
+        .{ .i = "a = a ( a / c )", .o = "s[rfc[rfrf]]" },
     };
     for (cases) |case| {
         const node = try grammar.parse(case.i);

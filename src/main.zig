@@ -16,13 +16,28 @@ const Node = struct {
     children: ?NodeList = null, // null here means a leaf node
 
     fn print(self: *const Node, data: []const u8, i: u32) void {
+        var end = self.end;
+
         indent(i);
-        std.debug.print("node name={s} start={d} end={d}\n", .{ self.name, self.start, self.end });
-        indent(i);
-        std.debug.print("value={s}\n", .{data[self.start..self.end]});
+        if (self.name.len != 0) {
+            std.debug.print("<Node called \"{s}\" ", .{self.name});
+        } else {
+            std.debug.print("<Node ", .{});
+        }
+        if (self.end - self.start > 10) {
+            end = self.start + 10;
+        }
+        if (std.mem.indexOfScalar(u8, data[self.start..end], '\n')) |newlnPos| {
+            end = self.start + newlnPos;
+        }
+        if (end == self.end) {
+            std.debug.print("matching \"{s}\">\n", .{data[self.start..self.end]});
+        } else {
+            std.debug.print("matching \"{s}\"...>\n", .{data[self.start..end]});
+        }
         if (self.children) |children| {
             for (children.items) |c| {
-                c.print(data, i + 2);
+                c.print(data, i + 1);
             }
         }
     }

@@ -29,13 +29,13 @@ const Node = struct {
 
 /// Compiles a regex pattern string and returns a pattern code you can use
 /// to match subjects. Returns `null` if something is wrong with the pattern
-fn compile(needle: []const u8, flag: u8) ?*regex.pcre2_code_8 {
+fn compile(needle: []const u8, options: u32) ?*regex.pcre2_code_8 {
     const pattern: regex.PCRE2_SPTR8 = needle.ptr;
     const patternLen: regex.PCRE2_SIZE = needle.len;
     var errornumber: c_int = undefined;
     var erroroffset: regex.PCRE2_SIZE = undefined;
 
-    const regexp: ?*regex.pcre2_code_8 = regex.pcre2_compile_8(pattern, patternLen, flag, &errornumber, &erroroffset, null);
+    const regexp: ?*regex.pcre2_code_8 = regex.pcre2_compile_8(pattern, patternLen, options, &errornumber, &erroroffset, null);
     if (regexp == null) {
         std.debug.print("re err: {d}\n", .{errornumber});
         var errbuf: [512]u8 = undefined;
@@ -61,16 +61,16 @@ fn find(regexp: *regex.pcre2_code_8, haystack: []const u8) ?usize {
         return null;
     }
 
-    const ovector = regex.pcre2_get_ovector_pointer_8(matchData);
-    // TODO: What is this actually checking? rc is set before ovector
     if (rc == 0) {
         std.debug.print("ovector was not big enough for all the captured substrings\n", .{});
         return null;
     }
+    const ovector = regex.pcre2_get_ovector_pointer_8(matchData);
+    regex.pcre2_match_data_free_8(matchData);
+    // TODO: What is this actually checking? rc is set before ovector
 
     if (ovector[0] > ovector[1]) {
         std.debug.print("error with ovector\n", .{});
-        regex.pcre2_match_data_free_8(matchData);
         regex.pcre2_code_free_8(regexp);
         return null;
     }
@@ -531,10 +531,23 @@ const Grammar = struct {
         }
 
         fn visit_regex(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
+            var options: u32 = 0;
+            const optionsNode = node.children.?.items[2];
             const quoted_re = try self.visit_generic(data, &node.children.?.items[1]);
-            const re = try self.grammar.createRegex(
+            for (data[optionsNode.start..optionsNode.end]) |c| {
+                options = options | switch (c) {
+                    'i' => regex.PCRE2_CASELESS,
+                    'm' => regex.PCRE2_MULTILINE,
+                    's' => regex.PCRE2_DOTALL,
+                    'u' => regex.PCRE2_UTF,
+                    'a' => regex.PCRE2_NEVER_UTF,
+                    else => 0,
+                };
+            }
+            const re = try self.grammar.createRegexOptions(
                 "",
                 getLiteralValue(quoted_re.?),
+                options,
             );
             return re;
         }
@@ -605,7 +618,11 @@ const Grammar = struct {
     }
 
     fn createRegex(self: *Grammar, name: []const u8, value: []const u8) !*Expression {
-        const re = compile(value, 0) orelse return GrammarError.InvalidRegex;
+        return self.createRegexOptions(name, value, 0);
+    }
+
+    fn createRegexOptions(self: *Grammar, name: []const u8, value: []const u8, options: u32) !*Expression {
+        const re = compile(value, options) orelse return GrammarError.InvalidRegex;
         return self.initExpression(name, .{ .regex = Regex{ .value = value, .re = re } });
     }
 
@@ -633,10 +650,10 @@ const Grammar = struct {
                 ignore,
             },
         );
-        const double_quoted_literal = try self.createRegex("",
+        const double_quoted_literal = try self.createRegex("double_quoted_literal",
             \\"[^"\\]*(?:\\.[^"\\]*)*"
         );
-        const single_quoted_literal = try self.createRegex("",
+        const single_quoted_literal = try self.createRegex("single_quoted_literal",
             \\'[^'\\]*(?:\\.[^'\\]*)*'
         );
         const quoted_literal = try self.createSequence(
@@ -648,8 +665,8 @@ const Grammar = struct {
         );
         const regex_exp = try self.createSequence("regex", &[_]*Expression{
             try self.createLiteral("", "~"),
-            quoted_literal,
-            try self.createRegex("", "[ilmsuxa]*"),
+            try self.createChoice("quoted_regexp", &[_]*Expression{ double_quoted_literal, single_quoted_literal }),
+            try self.createRegex("", "[imsua]*"),
             ignore,
             //ignore,
         });
@@ -759,7 +776,6 @@ const Grammar = struct {
                 }
             },
             .literal => |l| {
-                //std.debug.print("parse literal value={s}\n", .{l.value});
                 if (std.mem.startsWith(u8, toParse, l.value)) {
                     const old_pos = pos.*;
                     pos.* += l.value.len;
@@ -972,7 +988,7 @@ test "expressions" {
         const node = try grammar.parseWith(case.i, case.e);
         try nodeToString(&node.?, &nodeStr);
         try std.testing.expectEqualStrings(case.o, nodeStr.items);
-        // reset
+
         try nodeStr.resize(0);
     }
 }
@@ -1026,6 +1042,8 @@ test "grammar parsing" {
         .{ .i = "a = \"x\"", .o = "l" },
         .{ .i = "a = ~\"x\"", .o = "rx" },
         .{ .i = "a = ~\"x\"i", .o = "rx" },
+        .{ .i = "a = ~\"x\"is", .o = "rx" },
+        .{ .i = "a = ~\"x\"i", .o = "rx" },
         .{ .i = "a = 'a'", .o = "l" },
         .{ .i = "a = !b", .o = "n[rf]" },
         .{ .i = "a = b*", .o = "q[rf]" },
@@ -1045,7 +1063,7 @@ test "grammar parsing" {
         const new_grammar = try grammar.createGrammar(case.i);
         try expressionToString(new_grammar.root, &exprStr);
         try std.testing.expectEqualStrings(case.o, exprStr.items);
-        // reset
+
         try exprStr.resize(0);
     }
 }

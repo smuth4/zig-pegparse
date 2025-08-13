@@ -287,12 +287,12 @@ const Grammar = struct {
         };
     }
 
-    fn print(self: *Grammar) void {
+    fn print(self: *const Grammar) void {
         var referenceStack = std.ArrayList([]const u8).init(self.allocator);
         self.printInner(&referenceStack, self.root, 0);
     }
 
-    fn printInner(self: *Grammar, rs: *std.ArrayList([]const u8), e: *const Expression, i: u32) void {
+    fn printInner(self: *const Grammar, rs: *std.ArrayList([]const u8), e: *const Expression, i: u32) void {
         indent(i);
         switch (e.*.matcher) {
             .regex => |_| {
@@ -684,11 +684,20 @@ const Grammar = struct {
             ignore,
             //ignore,
         });
+        const parenthesized = try self.createSequence("parenthesized", &[_]*Expression{
+            try self.createLiteral("", "("),
+            ignore,
+            try self.createReference("", "expression"), // TODO: Use a direct pointer
+            ignore,
+            try self.createLiteral("", ")"),
+            ignore,
+        });
         const reference = try self.createSequence("reference", &[_]*Expression{ label, try self.createNot("", equals) });
         const atom = try self.createChoice("atom", &[_]*Expression{
             reference,
             quoted_literal,
             regex_exp,
+            parenthesized,
         });
         const quantifier = try self.createSequence("quantifier", &[_]*Expression{
             try self.createRegex("",
@@ -889,14 +898,24 @@ pub fn main() !void {
     _ = try g.bootstrap();
     std.debug.print("bootstrapped\n", .{});
     g.print();
-    const my_grammar =
-        \\bold_text  = bold_open text bold_close
-        \\text       = ~"[A-Z 0-9]*"
-        \\bold_open  = "(("
-        \\bold_close = "))"
+    const json_grammar =
+        \\String = S? '"' ( [^ " \ U+0000-U+001F ] / Escape )* '"' S?
+        \\Escape = ~"\\" ( ~"[bfnrt]" / UnicodeEscape )
+        \\UnicodeEscape = "u" ~"[0-9A-Fa-f]{4}"
+        \\True = "true"
+        \\False = "false"
+        \\Null = "null"
+        \\Number = Minus? IntegralPart FractionalPart? ExponentPart?
+        \\Minus = "-"
+        \\IntegralPart = "0" / ~"[1-9]" ~"[0-9]*"
+        \\FractionalPart = "." ~"[0-9]+"
+        \\ExponentPart = ~"[eE][+-]?" ~"[0-9]+"
+        \\S = ~"\s+"
     ;
-    const n = try g.parse(my_grammar);
-    n.?.print(my_grammar, 0);
+    const n = try g.parse(json_grammar);
+    n.?.print(json_grammar, 0);
+    const g2 = try g.createGrammar(json_grammar);
+    g2.print();
 }
 
 /////////////
@@ -1055,6 +1074,7 @@ test "grammar parsing" {
         .{ .i = "a = a # comment", .o = "rf" },
         .{ .i = "a = \"x\"", .o = "l" },
         .{ .i = "a = ~\"x\"", .o = "rx" },
+        .{ .i = "a = ~'x'", .o = "rx" },
         .{ .i = "a = ~\"x\"i", .o = "rx" },
         .{ .i = "a = ~\"x\"is", .o = "rx" },
         .{ .i = "a = ~\"x\"i", .o = "rx" },
@@ -1070,6 +1090,9 @@ test "grammar parsing" {
         .{ .i = "a = b{3}", .o = "q[rf]" },
         .{ .i = "a = a b c", .o = "s[rfrfrf]" },
         .{ .i = "a = a / b / c", .o = "c[rfrfrf]" },
+        .{ .i = "a = ( a b c )", .o = "s[rfrfrf]" },
+
+        .{ .i = "a = a ( a / c )", .o = "s[rfrfrf]" },
     };
     for (cases) |case| {
         const node = try grammar.parse(case.i);

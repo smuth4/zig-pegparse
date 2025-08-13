@@ -375,7 +375,8 @@ const Grammar = struct {
             try self.visitorTable.put("regex", &ExpressionVisitor.visit_regex);
             try self.visitorTable.put("rule", &ExpressionVisitor.visit_rule);
             try self.visitorTable.put("label_regex", &ExpressionVisitor.visit_label_regex);
-            try self.visitorTable.put("quoted_literal", &ExpressionVisitor.visit_quoted_literal);
+            try self.visitorTable.put("single_quoted_literal", &ExpressionVisitor.visit_double_quoted_literal);
+            try self.visitorTable.put("double_quoted_literal", &ExpressionVisitor.visit_single_quoted_literal);
             try self.visitorTable.put("sequence", &ExpressionVisitor.visit_sequence);
             try self.visitorTable.put("ored", &ExpressionVisitor.visit_ored);
             try self.visitorTable.put("reference", &ExpressionVisitor.visit_reference);
@@ -470,7 +471,14 @@ const Grammar = struct {
             return null;
         }
 
-        fn visit_quoted_literal(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
+        // TODO handle escape sequences
+        fn visit_double_quoted_literal(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
+            // Send back an empty-value literal with the data as the name
+            return try self.grammar.createLiteral("", data[(node.start + 1)..(node.end - 1)]);
+        }
+
+        // TODO handle escape sequences
+        fn visit_single_quoted_literal(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
             // Send back an empty-value literal with the data as the name
             return try self.grammar.createLiteral("", data[(node.start + 1)..(node.end - 1)]);
         }

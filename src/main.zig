@@ -83,11 +83,9 @@ fn find(regexp: *regex.pcre2_code_8, haystack: []const u8) ?usize {
     }
     const ovector = regex.pcre2_get_ovector_pointer_8(matchData);
     regex.pcre2_match_data_free_8(matchData);
-    // TODO: What is this actually checking? rc is set before ovector
 
     if (ovector[0] > ovector[1]) {
         std.debug.print("error with ovector\n", .{});
-        regex.pcre2_code_free_8(regexp);
         return null;
     }
     return ovector[1] - ovector[0];

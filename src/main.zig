@@ -267,11 +267,19 @@ const Expression = struct {
 };
 
 const ReferenceTable = std.StringHashMap(*Expression);
+const PackratEntry = struct {
+    pos: usize,
+    exp: *const Expression,
+};
+
+const PackratMap = std.AutoHashMap(PackratEntry, ?usize);
+
 const Grammar = struct {
     // Where parsing starts from
     root: *Expression,
     // Holds points to expressions for reference lookups
     references: ReferenceTable,
+    packratCache: PackratMap,
     allocator: Allocator,
     matchCount: usize,
 
@@ -283,6 +291,7 @@ const Grammar = struct {
             .root = undefined,
             .allocator = allocator,
             .references = ReferenceTable.init(allocator),
+            .packratCache = PackratMap.init(allocator),
             .matchCount = 0,
         };
     }
@@ -820,20 +829,57 @@ const Grammar = struct {
 
     // Return a tree of Nodes after parsing. Optionals are used to indicate if no match was found.
     pub fn match(self: *Grammar, exp: *const Expression, data: []const u8, pos: *usize) !?Node {
-        self.matchCount += 1;
         const toParse = data[pos.*..];
+        self.matchCount += 1;
         //if (pos.* != data.len) {
         //    std.debug.print("remaining: {s}\n", .{data[pos.*..@min(pos.* + 10, data.len)]});
         //}
         switch (exp.*.matcher) {
+            .regex => {},
+            .literal => {},
+            else => {
+                const entry = PackratEntry{ .pos = pos.*, .exp = exp };
+                const cacheResult = try self.packratCache.getOrPut(entry);
+                if (cacheResult.found_existing) {
+                    if (cacheResult.value_ptr.*) |_| {
+                        std.debug.print("pos cache hit\n", .{});
+                        //const old_pos = pos.*;
+                        //pos.* = hit;
+                        //return Node{ .name = exp.name, .start = old_pos, .end = pos.* };
+                    } else {
+                        std.debug.print("neg cache hit: pos={d}\n", .{pos.*});
+                        //return null;
+                    }
+                } else {
+                    //std.debug.print("cache miss\n", .{});
+                    cacheResult.value_ptr.* = 0;
+                }
+            },
+        }
+        switch (exp.*.matcher) {
             .regex => |r| {
-                // std.debug.print("parse regex name={s} value={s}\n", .{ exp.name, r.value });
+                //std.debug.print("parse regex name={s} value={s}\n", .{ exp.name, r.value });
+                // const entry = PackratEntry{ .pos = pos.*, .exp = exp };
+                // const cacheResult = try self.packratCache.getOrPut(entry);
+                // if (cacheResult.found_existing) {
+                //     if (cacheResult.value_ptr.*) |hit| {
+                //         //std.debug.print("pos cache hit\n", .{});
+                //         const old_pos = pos.*;
+                //         pos.* = hit;
+                //         return Node{ .name = exp.name, .start = old_pos, .end = pos.* };
+                //     } else {
+                //         //std.debug.print("neg cache hit: pos={d}\n", .{pos.*});
+                //         return null;
+                //     }
+                // }
                 if (find(r.re, toParse)) |result| {
                     //std.debug.print("parse regex match: {s}\n", .{toParse[0..result]});
                     const old_pos = pos.*;
                     pos.* += result;
+                    //    cacheResult.value_ptr.* = pos.*;
                     return Node{ .name = exp.name, .start = old_pos, .end = pos.* };
                 } else {
+                    //    cacheResult.value_ptr.* = null;
                     return null;
                 }
             },
@@ -970,7 +1016,7 @@ pub fn main() !void {
     //g2.print();
     var pos: usize = 0;
     _ = try g2.match(g2.root, fileContents, &pos);
-    std.debug.print("pos: {d} matches: {d}\n", .{ pos, g2.matchCount });
+    std.debug.print("pos: {d} matches: {d} cache: {d}\n", .{ pos, g2.matchCount, g2.packratCache.count() });
 
     //n2.?.print("{\"foo\": \"bar\" } ", 0);
 }

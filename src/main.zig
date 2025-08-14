@@ -865,6 +865,7 @@ const Grammar = struct {
                         try children.append(n);
                     } else {
                         pos.* = old_pos;
+                        children.deinit();
                         return null;
                     }
                 }
@@ -886,6 +887,7 @@ const Grammar = struct {
                     }
                 }
                 //std.debug.print("parse choice name={s} failed\n", .{exp.name});
+                children.deinit();
                 return null;
             },
             .lookahead => |l| {
@@ -922,6 +924,7 @@ const Grammar = struct {
                     return Node{ .name = exp.name, .start = old_pos, .end = pos.*, .children = children };
                 } else {
                     pos.* = old_pos;
+                    children.deinit();
                     return null;
                 }
             },

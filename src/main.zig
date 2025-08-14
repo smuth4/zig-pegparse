@@ -488,10 +488,8 @@ const Grammar = struct {
             node.print(data, 0);
             // term+
             if (node.children.?.items[0].children.?.items.len == 1) {
-                for (node.children.?.items[0].children.?.items) |child| {
-                    if (try self.visit_generic(data, &child)) |result| {
-                        try exprs.append(result);
-                    }
+                if (try self.visit_generic(data, &node.children.?.items[0].children.?.items[0])) |result| {
+                    try exprs.append(result);
                 }
             } else {
                 var seq = try self.grammar.createSequence("", &[_]*Expression{});

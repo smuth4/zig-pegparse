@@ -378,7 +378,6 @@ const Grammar = struct {
 
         fn visit_ored(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
             var exprs = ExpressionList.init(self.allocator);
-            node.print(data, 0);
             // term+
             if (node.children.?.items[0].children.?.items.len == 1) {
                 if (try self.visit_generic(data, &node.children.?.items[0].children.?.items[0])) |result| {
@@ -743,27 +742,12 @@ const Grammar = struct {
         switch (exp.*.matcher) {
             .regex => |r| {
                 //std.debug.print("parse regex name={s} value={s}\n", .{ exp.name, r.value });
-                // const entry = PackratEntry{ .pos = pos.*, .exp = exp };
-                // const cacheResult = try self.packratCache.getOrPut(entry);
-                // if (cacheResult.found_existing) {
-                //     if (cacheResult.value_ptr.*) |hit| {
-                //         //std.debug.print("pos cache hit\n", .{});
-                //         const old_pos = pos.*;
-                //         pos.* = hit;
-                //         return Node{ .name = exp.name, .start = old_pos, .end = pos.* };
-                //     } else {
-                //         //std.debug.print("neg cache hit: pos={d}\n", .{pos.*});
-                //         return null;
-                //     }
-                // }
                 if (find(r.re, toParse)) |result| {
                     //std.debug.print("parse regex match: {s}\n", .{toParse[0..result]});
                     const old_pos = pos.*;
                     pos.* += result;
-                    //    cacheResult.value_ptr.* = pos.*;
                     return Node{ .name = exp.name, .start = old_pos, .end = pos.* };
                 } else {
-                    //    cacheResult.value_ptr.* = null;
                     return null;
                 }
             },

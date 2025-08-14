@@ -275,6 +275,7 @@ const Grammar = struct {
     // Holds points to expressions for reference lookups
     references: ReferenceTable,
     allocator: Allocator,
+    matchCount: usize,
 
     pub fn init(allocator: Allocator) Grammar {
         return Grammar{
@@ -284,6 +285,7 @@ const Grammar = struct {
             .root = undefined,
             .allocator = allocator,
             .references = ReferenceTable.init(allocator),
+            .matchCount = 0,
         };
     }
 
@@ -295,8 +297,8 @@ const Grammar = struct {
     fn printInner(self: *const Grammar, rs: *std.ArrayList([]const u8), e: *const Expression, i: u32) void {
         indent(i);
         switch (e.*.matcher) {
-            .regex => |_| {
-                std.debug.print("regex name={s}\n", .{e.name});
+            .regex => |r| {
+                std.debug.print("regex name={s} value={s}\n", .{ e.name, r.value });
             },
             .literal => |l| {
                 std.debug.print("literal name={s} value={s}\n", .{ e.name, l.value });
@@ -356,6 +358,9 @@ const Grammar = struct {
         var pos: usize = 0;
         const n = try self.match(root, data, &pos);
         if (pos != data.len) {
+            //const start = if (pos > 5) pos - 5 else pos;
+            //const end = if (pos < data.len - 6) pos + 5 else data.len - 1;
+            //std.debug.print("failed at: {s}\n", .{data[start..end]});
             return null;
         }
         return n;
@@ -393,6 +398,7 @@ const Grammar = struct {
             try self.visitorTable.put("double_quoted_literal", &ExpressionVisitor.visit_single_quoted_literal);
             try self.visitorTable.put("sequence", &ExpressionVisitor.visit_sequence);
             try self.visitorTable.put("ored", &ExpressionVisitor.visit_ored);
+            try self.visitorTable.put("or_term", &ExpressionVisitor.visit_or_term);
             try self.visitorTable.put("reference", &ExpressionVisitor.visit_reference);
             try self.visitorTable.put("quantified", &ExpressionVisitor.visit_quantified);
             std.debug.assert(std.mem.eql(u8, node.name, "rules"));
@@ -460,11 +466,45 @@ const Grammar = struct {
             return opt_expr;
         }
 
+        fn visit_or_term(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
+            if (node.children.?.items[2].children.?.items.len == 1) {
+                for (node.children.?.items[2].children.?.items) |child| {
+                    if (try self.visit_generic(data, &child)) |result| {
+                        return result;
+                    }
+                }
+            } else {
+                var seq = try self.grammar.createSequence("", &[_]*Expression{});
+                for (node.children.?.items[2].children.?.items) |child| {
+                    if (try self.visit_generic(data, &child)) |result| {
+                        try seq.matcher.sequence.children.append(result);
+                    }
+                }
+                return seq;
+            }
+            return null;
+        }
+
         fn visit_ored(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
             var exprs = ExpressionList.init(self.allocator);
-            if (try self.visit_generic(data, &node.children.?.items[0])) |result| {
-                try exprs.append(result);
+            node.print(data, 0);
+            // term+
+            if (node.children.?.items[0].children.?.items.len == 1) {
+                for (node.children.?.items[0].children.?.items) |child| {
+                    if (try self.visit_generic(data, &child)) |result| {
+                        try exprs.append(result);
+                    }
+                }
+            } else {
+                var seq = try self.grammar.createSequence("", &[_]*Expression{});
+                for (node.children.?.items[0].children.?.items) |child| {
+                    if (try self.visit_generic(data, &child)) |result| {
+                        try seq.matcher.sequence.children.append(result);
+                    }
+                }
+                try exprs.append(seq);
             }
+            // or_term+
             for (node.children.?.items[1].children.?.items) |child| {
                 if (try self.visit_generic(data, &child)) |result| {
                     try exprs.append(result);
@@ -784,11 +824,14 @@ const Grammar = struct {
 
     // Return a tree of Nodes after parsing. Optionals are used to indicate if no match was found.
     pub fn match(self: *Grammar, exp: *const Expression, data: []const u8, pos: *usize) !?Node {
+        self.matchCount += 1;
         const toParse = data[pos.*..];
-        //std.debug.print("remaining: {s}\n", .{toParse});
+        //if (pos.* != data.len) {
+        //    std.debug.print("remaining: {s}\n", .{data[pos.*..@min(pos.* + 10, data.len)]});
+        //}
         switch (exp.*.matcher) {
             .regex => |r| {
-                //std.debug.print("parse regex name={s} value={s}\n", .{ exp.name, r.value });
+                // std.debug.print("parse regex name={s} value={s}\n", .{ exp.name, r.value });
                 if (find(r.re, toParse)) |result| {
                     //std.debug.print("parse regex match: {s}\n", .{toParse[0..result]});
                     const old_pos = pos.*;
@@ -800,6 +843,7 @@ const Grammar = struct {
             },
             .literal => |l| {
                 if (std.mem.startsWith(u8, toParse, l.value)) {
+                    //std.debug.print("match literal value={s}\n", .{l.value});
                     const old_pos = pos.*;
                     pos.* += l.value.len;
                     return Node{ .name = exp.name, .start = old_pos, .end = pos.* };
@@ -896,10 +940,15 @@ pub fn main() !void {
     var g = Grammar.init(allocator);
 
     _ = try g.bootstrap();
-    std.debug.print("bootstrapped\n", .{});
-    g.print();
+    //g.print();
     const json_grammar =
-        \\String = S? '"' ( [^ " \ U+0000-U+001F ] / Escape )* '"' S?
+        \\JSON = S? ( Object / Array / String / True / False / Null / Number ) S?
+        \\Object = "{"
+        \\     String ":" JSON ( "," String ":" JSON )*
+        \\ "}"
+        \\ObjectPair = String ":" JSON
+        \\Array = "[" JSON ( "," JSON )* "]"
+        \\String = S? ~'"[^"\\]*(?:\\.[^"\\]*)*"' S?
         \\Escape = ~"\\" ( ~"[bfnrt]" / UnicodeEscape )
         \\UnicodeEscape = "u" ~"[0-9A-Fa-f]{4}"
         \\True = "true"
@@ -912,10 +961,19 @@ pub fn main() !void {
         \\ExponentPart = ~"[eE][+-]?" ~"[0-9]+"
         \\S = ~"\s+"
     ;
-    const n = try g.parse(json_grammar);
-    n.?.print(json_grammar, 0);
-    const g2 = try g.createGrammar(json_grammar);
-    g2.print();
+    //const _ = try g.parse(json_grammar);
+    //n.?.print(json_grammar, 0);
+    const args = try std.process.argsAlloc(allocator); // Get arguments as a slice
+    defer std.process.argsFree(allocator, args); // Free allocated memory
+    const cwd = std.fs.cwd();
+    const fileContents = try cwd.readFileAlloc(allocator, args[1], std.math.maxInt(usize));
+    var g2 = try g.createGrammar(json_grammar);
+    //g2.print();
+    var pos: usize = 0;
+    _ = try g2.match(g2.root, fileContents, &pos);
+    std.debug.print("pos: {d} matches: {d}\n", .{ pos, g2.matchCount });
+
+    //n2.?.print("{\"foo\": \"bar\" } ", 0);
 }
 
 /////////////
@@ -1093,9 +1151,12 @@ test "grammar parsing" {
         .{ .i = "a = ( a b c )", .o = "s[rfrfrf]" },
 
         .{ .i = "a = a ( a / c )", .o = "s[rfc[rfrf]]" },
+        .{ .i = "a = a / b c", .o = "c[rfs[rfrf]]" },
+        .{ .i = "a = a / b / c / a", .o = "c[rfrfrfrf]" },
     };
     for (cases) |case| {
         const node = try grammar.parse(case.i);
+        node.?.print(case.i, 0);
         try std.testing.expectEqual(node.?.end, case.i.len);
         const new_grammar = try grammar.createGrammar(case.i);
         try expressionToString(new_grammar.root, &exprStr);

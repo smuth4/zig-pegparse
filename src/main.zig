@@ -15,6 +15,14 @@ const Node = struct {
     end: usize,
     children: ?NodeList = null, // null here means a leaf node
 
+    fn create(allocator: Allocator, name: []const u8, start: usize, end: usize) !Node {
+        var n = try allocator.create(Node);
+        n.name = name;
+        n.start = start;
+        n.end = end;
+        return n;
+    }
+
     fn print(self: *const Node, data: []const u8, i: u32) void {
         var end = self.end;
 
@@ -40,6 +48,15 @@ const Node = struct {
                 c.print(data, i + 1);
             }
         }
+    }
+
+    fn deinit(self: *const Node, allocator: Allocator) void {
+        if (self.children) |children| {
+            for (children.items) |c| {
+                c.deinit(allocator);
+            }
+        }
+        allocator.free(self);
     }
 };
 
@@ -166,6 +183,7 @@ const Grammar = struct {
     packratCache: PackratMap,
     allocator: Allocator,
     matchCount: usize,
+    ignorePrefix: u8 = '_',
 
     pub fn init(allocator: Allocator) Grammar {
         return Grammar{
@@ -714,27 +732,29 @@ const Grammar = struct {
     pub fn match(self: *Grammar, exp: *const Expression, data: []const u8, pos: *usize) !?Node {
         const toParse = data[pos.*..];
         self.matchCount += 1;
+        //std.debug.print("match\n", .{});
         //if (pos.* != data.len) {
         //    std.debug.print("remaining: {s}\n", .{data[pos.*..@min(pos.* + 10, data.len)]});
         //}
         switch (exp.*.matcher) {
-            .regex => {},
             .literal => {},
+            .regex => {},
+            .reference => {},
             else => {
                 const entry = PackratEntry{ .pos = pos.*, .exp = exp };
                 const cacheResult = try self.packratCache.getOrPut(entry);
                 if (cacheResult.found_existing) {
                     if (cacheResult.value_ptr.*) |_| {
-                        std.debug.print("pos cache hit\n", .{});
+                        //std.debug.print("pos cache hit\n", .{});
                         //const old_pos = pos.*;
                         //pos.* = hit;
                         //return Node{ .name = exp.name, .start = old_pos, .end = pos.* };
                     } else {
-                        std.debug.print("neg cache hit: pos={d}\n", .{pos.*});
+                        //std.debug.print("neg cache hit: pos={d}\n", .{pos.*});
                         //return null;
                     }
                 } else {
-                    //std.debug.print("cache miss\n", .{});
+                    // std.debug.print("cache miss\n", .{});
                     cacheResult.value_ptr.* = 0;
                 }
             },
@@ -752,6 +772,7 @@ const Grammar = struct {
                 }
             },
             .literal => |l| {
+                //std.debug.print("literal value={s}\n", .{l.value});
                 if (std.mem.startsWith(u8, toParse, l.value)) {
                     //std.debug.print("match literal value={s}\n", .{l.value});
                     const old_pos = pos.*;
@@ -772,7 +793,11 @@ const Grammar = struct {
                 const old_pos = pos.*;
                 for (s.children.items) |c| {
                     if (try self.match(c, data, pos)) |n| {
-                        try children.append(n);
+                        if (n.name.len != 0 and n.name[0] == self.ignorePrefix) {
+                            try children.append(Node{ .name = n.name, .start = n.start, .end = n.end });
+                        } else {
+                            try children.append(n);
+                        }
                     } else {
                         pos.* = old_pos;
                         children.deinit();
@@ -841,6 +866,211 @@ const Grammar = struct {
         }
         return null;
     }
+
+    fn optimize(self: *Grammar) void {
+        self.optimizeInner(self.root);
+    }
+
+    fn optimizeInner(self: *Grammar, exp: *Expression) void {
+        switch (exp.*.matcher) {
+            .choice => |c| {
+                for (c.children.items) |*child| {
+                    switch (child.*.matcher) {
+                        // Cut out any references with direct pointers
+                        .reference => |r| {
+                            if (self.references.get(r.target)) |*ref| {
+                                child.* = ref.*;
+                            }
+                        },
+                        else => {
+                            self.optimizeInner(child.*);
+                        },
+                    }
+                }
+            },
+            .sequence => |c| {
+                for (c.children.items) |*child| {
+                    switch (child.*.matcher) {
+                        // Cut out any references with direct pointers
+                        .reference => |r| {
+                            if (self.references.get(r.target)) |*ref| {
+                                child.* = ref.*;
+                            }
+                        },
+                        else => {
+                            self.optimizeInner(child.*);
+                        },
+                    }
+                }
+            },
+            else => {},
+        }
+    }
+
+    // Return a tree of Nodes after parsing. Optionals are used to indicate if no match was found.
+    // Uses a stack instead of recursion
+    pub fn stackMatch(self: *Grammar, root_exp: *const Expression, data: []const u8, pos: *usize) !?Node {
+        const toParse = data[pos.*..];
+        var stack = std.ArrayList(*const Expression).init(self.allocator);
+        var nodeAcc = std.ArrayList(?Node).init(self.allocator);
+        try stack.append(root_exp);
+        self.matchCount += 1;
+        var exp: *const Expression = undefined;
+        while (true) {
+            std.debug.print("stack: ", .{});
+            for (stack.items) |i| {
+                std.debug.print("\"{s}\" ", .{i.name});
+            }
+            std.debug.print("\n", .{});
+
+            std.debug.print("acc: ", .{});
+            for (nodeAcc.items) |i| {
+                if (i) |n| {
+                    std.debug.print("\"{s}\" ", .{n.name});
+                } else {
+                    std.debug.print("null ", .{});
+                }
+            }
+            std.debug.print("\n", .{});
+
+            if (stack.pop()) |poppedExp| {
+                exp = poppedExp;
+            } else {
+                break;
+            }
+
+            switch (exp.*.matcher) {
+                .regex => |r| {
+                    //std.debug.print("parse regex name={s} value={s}\n", .{ exp.name, r.value });
+                    if (find(r.re, toParse)) |result| {
+                        //std.debug.print("parse regex match: {s}\n", .{toParse[0..result]});
+                        const old_pos = pos.*;
+                        pos.* += result;
+                        try nodeAcc.append(Node{ .name = exp.name, .start = old_pos, .end = pos.* });
+                    } else {
+                        try nodeAcc.append(null);
+                    }
+                },
+                .literal => |l| {
+                    //std.debug.print("literal value={s}\n", .{l.value});
+                    if (std.mem.startsWith(u8, toParse, l.value)) {
+                        //std.debug.print("match literal value={s}\n", .{l.value});
+                        const old_pos = pos.*;
+                        pos.* += l.value.len;
+                        try nodeAcc.append(Node{ .name = exp.name, .start = old_pos, .end = pos.* });
+                    } else {
+                        try nodeAcc.append(null);
+                    }
+                },
+                .reference => |r| {
+                    //std.debug.print("parse reference target={s}\n", .{r.target});
+                    if (nodeAcc.items.len > 0) {
+                        continue;
+                    } else if (self.references.get(r.target)) |ref| {
+                        try stack.append(ref);
+                    }
+                },
+                .sequence => |s| {
+                    // std.debug.print("parse sequence name={s}\n", .{exp.name});
+                    // Use the size of the accumulator to track where we are in the sequence
+                    const seq_pos = nodeAcc.items.len;
+                    if (seq_pos < s.children.items.len) {
+                        if (seq_pos > 0 and nodeAcc.items[seq_pos - 1] == null) {
+                            // Failure, short circuit
+
+                            // If we advanced the pointer at all...
+                            if (nodeAcc.items.len > 1) {
+                                // Reset the pointer to the start of the first node
+                                pos.* = nodeAcc.items[0].?.start;
+                            }
+                            nodeAcc.clearRetainingCapacity();
+                            try nodeAcc.append(null);
+                        } else {
+                            // Push ourselves and the next child onto the stack
+                            try stack.append(exp);
+                            try stack.append(s.children.items[seq_pos]);
+                        }
+                    } else {
+                        // We've reached the end, drain the accumulator and add our result
+                        const pos_start = nodeAcc.items[0].?.start;
+                        var children = NodeList.init(self.allocator);
+                        for (nodeAcc.items) |i| {
+                            try children.append(i.?);
+                        }
+                        const n: Node = Node{ .name = exp.name, .start = pos_start, .end = pos.*, .children = children };
+                        nodeAcc.clearRetainingCapacity();
+                        try nodeAcc.append(n);
+                    }
+                },
+                .choice => |s| {
+                    // std.debug.print("parse choice name={s}\n", .{exp.name});
+                    // Use the size of the accumulator to track where we are in the choice
+                    const seq_pos = nodeAcc.items.len;
+                    if (seq_pos < s.children.items.len) {
+                        if (seq_pos > 0 and nodeAcc.items[seq_pos - 1] != null) {
+                            // Found a match, short circuit
+
+                            const goodNode = nodeAcc.items[seq_pos - 1].?;
+                            const pos_start = goodNode.start;
+                            var children = NodeList.init(self.allocator);
+                            try children.append(goodNode);
+                            const n: Node = Node{ .name = exp.name, .start = pos_start, .end = pos.*, .children = children };
+                            nodeAcc.clearRetainingCapacity();
+                            try nodeAcc.append(n);
+                        } else {
+                            try stack.append(exp);
+                            try stack.append(s.children.items[seq_pos]);
+                        }
+                    } else {
+                        // We've reached the end, no matches, return null
+                        try nodeAcc.append(null);
+                    }
+                },
+                .lookahead => |l| {
+                    // std.debug.print("parse lookahead name={s}\n", .{exp.name});
+                    if (nodeAcc.items.len == 0) {
+                        try stack.append(exp);
+                        try stack.append(l.child);
+                    } else {
+                        if (nodeAcc.items[0]) |n| {
+                            // Always reset the pointer if it was advanced
+                            pos.* = n.start;
+                            try nodeAcc.append(if (l.negative) null else Node{ .name = exp.name, .start = n.start, .end = n.end });
+                        } else {
+                            try nodeAcc.append(if (!l.negative) null else Node{ .name = exp.name, .start = pos.*, .end = pos.* });
+                        }
+                    }
+                },
+                .quantity => |q| {
+                    // std.debug.print("parse quantity name={s}\n", .{exp.name});
+
+                    // Accumulate nodes until we get null or max is reached;
+                    const seq_pos = nodeAcc.items.len;
+                    if (seq_pos == q.max or (seq_pos > 0 and nodeAcc.items[seq_pos - 1] == null)) {
+                        if (nodeAcc.items[seq_pos - 1] == null) {
+                            _ = nodeAcc.pop();
+                        }
+                        if (nodeAcc.items.len >= q.min) {
+                            var children = NodeList.init(self.allocator);
+                            for (nodeAcc.items) |i| {
+                                try children.append(i.?);
+                            }
+                            const pos_start = if (nodeAcc.items.len == 0) pos.* else nodeAcc.items[0].?.start;
+                            const n: Node = Node{ .name = exp.name, .start = pos_start, .end = pos.*, .children = children };
+                            nodeAcc.clearRetainingCapacity();
+                            try nodeAcc.append(n);
+                        } else {
+                            try nodeAcc.append(null);
+                        }
+                    } else {
+                        try stack.append(exp);
+                        try stack.append(q.child);
+                    }
+                },
+            }
+        }
+        return null;
+    }
 };
 
 pub fn main() !void {
@@ -855,13 +1085,12 @@ pub fn main() !void {
     _ = try g.bootstrap();
     //g.print();
     const json_grammar =
-        \\JSON = S? ( Object / Array / String / True / False / Null / Number ) S?
+        \\JSON = _S? ( Object / Array / String / True / False / Null / Number ) _S?
         \\Object = "{"
         \\     String ":" JSON ( "," String ":" JSON )*
         \\ "}"
-        \\ObjectPair = String ":" JSON
         \\Array = "[" JSON ( "," JSON )* "]"
-        \\String = S? ~'"[^"\\]*(?:\\.[^"\\]*)*"' S?
+        \\String = _S? ~'"[^"\\]*(?:\\.[^"\\]*)*"' _S?
         \\Escape = ~"\\" ( ~"[bfnrt]" / UnicodeEscape )
         \\UnicodeEscape = "u" ~"[0-9A-Fa-f]{4}"
         \\True = "true"
@@ -872,7 +1101,7 @@ pub fn main() !void {
         \\IntegralPart = "0" / ~"[1-9]" ~"[0-9]*"
         \\FractionalPart = "." ~"[0-9]+"
         \\ExponentPart = ~"[eE][+-]?" ~"[0-9]+"
-        \\S = ~"\s+"
+        \\_S = ~"\s+"
     ;
     //const _ = try g.parse(json_grammar);
     //n.?.print(json_grammar, 0);
@@ -882,8 +1111,21 @@ pub fn main() !void {
     const fileContents = try cwd.readFileAlloc(allocator, args[1], std.math.maxInt(usize));
     var g2 = try g.createGrammar(json_grammar);
     //g2.print();
+    g2.optimize();
     var pos: usize = 0;
+
+    // var start_time = try std.time.Instant.now();
+    // _ = try g2.stackMatch(g2.root, fileContents, &pos);
+    // var end_time = try std.time.Instant.now();
+    // var elapsed_nanos = end_time.since(start_time);
+    // std.debug.print("Elapsed time: {d} s\n", .{elapsed_nanos / 1_000_000});
+
+    const start_time = try std.time.Instant.now();
     _ = try g2.match(g2.root, fileContents, &pos);
+    const end_time = try std.time.Instant.now();
+    const elapsed_nanos = end_time.since(start_time);
+    std.debug.print("Elapsed time: {d} s\n", .{elapsed_nanos / 1_000_000});
+
     std.debug.print("pos: {d} matches: {d} cache: {d}\n", .{ pos, g2.matchCount, g2.packratCache.count() });
 
     //n2.?.print("{\"foo\": \"bar\" } ", 0);

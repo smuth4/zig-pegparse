@@ -7,6 +7,7 @@ fn indent(level: u32) void {
     }
 }
 
+// A n-ary tree of nodes, which mananges it's own memory
 pub fn NaryTree(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -53,6 +54,8 @@ pub fn NaryTree(comptime T: type) type {
             return new;
         }
 
+        // Note that this does not handle updating the parent to
+        // remove the now-invalid pointer
         pub fn nodeDeinit(self: *@This(), n: *Node) void {
             n.deinit(&self.nodePool, self.allocator);
             self.nodePool.destroy(n);

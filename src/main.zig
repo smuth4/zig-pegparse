@@ -828,7 +828,9 @@ const Grammar = struct {
 };
 
 pub fn main() !void {
-    const allocator = std.heap.c_allocator;
+    const callocator = std.heap.c_allocator;
+    var lallocator = LoggingAllocator.init(callocator);
+    const allocator = lallocator.allocator();
 
     var g = Grammar.init(allocator);
     defer g.deinit();
@@ -1167,3 +1169,72 @@ test "grammar parsing" {
         try exprStr.resize(0);
     }
 }
+
+pub const LoggingAllocator = struct {
+    underlying_allocator: std.mem.Allocator,
+
+    pub fn init(underlying_allocator: std.mem.Allocator) LoggingAllocator {
+        return .{ .underlying_allocator = underlying_allocator };
+    }
+
+    pub fn allocator(self: *LoggingAllocator) std.mem.Allocator {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .free = free,
+                .remap = remap,
+            },
+        };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, ptr_align: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *LoggingAllocator = @ptrCast(@alignCast(ctx));
+        std.debug.print("Allocating {} bytes (alignment {})\n", .{ len, ptr_align });
+        const result = self.underlying_allocator.vtable.alloc(
+            self.underlying_allocator.ptr,
+            len,
+            ptr_align,
+            ret_addr,
+        );
+        return result;
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *LoggingAllocator = @ptrCast(@alignCast(ctx));
+        std.debug.print("Remapping {} bytes (alignment {})\n", .{ new_len, alignment });
+        const result = self.underlying_allocator.vtable.remap(
+            self.underlying_allocator.ptr,
+            memory,
+            alignment,
+            new_len,
+            ret_addr,
+        );
+        return result;
+    }
+
+    fn resize(ctx: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *LoggingAllocator = @ptrCast(@alignCast(ctx));
+        std.debug.print("Resizing from {} to {} bytes (alignment {})\n", .{ buf.len, new_len, buf_align });
+        const result = self.underlying_allocator.vtable.resize(
+            self.underlying_allocator.ptr,
+            buf,
+            buf_align,
+            new_len,
+            ret_addr,
+        );
+        return result;
+    }
+
+    fn free(ctx: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, ret_addr: usize) void {
+        const self: *LoggingAllocator = @ptrCast(@alignCast(ctx));
+        std.debug.print("Freeing {} bytes (alignment {})\n", .{ buf.len, buf_align });
+        self.underlying_allocator.vtable.free(
+            self.underlying_allocator.ptr,
+            buf,
+            buf_align,
+            ret_addr,
+        );
+    }
+};

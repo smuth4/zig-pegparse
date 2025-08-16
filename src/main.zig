@@ -790,6 +790,7 @@ const Grammar = struct {
                 // TODO: deinit on failure?
                 //std.debug.print("parse sequence name={s}\n", .{exp.name});
                 var children = std.ArrayList(Node).init(self.allocator);
+                try children.ensureTotalCapacity(s.children.items.len);
                 const old_pos = pos.*;
                 for (s.children.items) |c| {
                     if (try self.match(c, data, pos)) |n| {
@@ -810,6 +811,7 @@ const Grammar = struct {
                 // TODO: deinit on failure?
                 //std.debug.print("parse choice name={s}\n", .{exp.name});
                 var children = std.ArrayList(Node).init(self.allocator);
+                try children.ensureTotalCapacity(s.children.items.len);
                 const old_pos = pos.*;
                 for (s.children.items) |c| {
                     if (try self.match(c, data, pos)) |n| {

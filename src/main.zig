@@ -147,16 +147,18 @@ const ReferenceTable = std.StringHashMap(*Expression);
 const ReferenceList = std.ArrayList(*Expression);
 
 const Grammar = struct {
+    allocator: Allocator,
     // Where parsing defaults to starting from
     root: *Expression,
     // Holds points to expressions for reference lookups
     references: ReferenceTable,
-    allocator: Allocator,
+    // Expressions can be recursive and accidentally orphaned, but should be relatively small, hence a dedicated arena for them
     expressionArena: std.heap.ArenaAllocator,
     ignorePrefix: u8 = '_',
     // Some debugging stats
     matchCount: usize = 0,
     nodeCount: usize = 0,
+    backtrackCount: usize = 0,
 
     pub fn init(allocator: Allocator) Grammar {
         return Grammar{
@@ -826,15 +828,7 @@ const Grammar = struct {
 };
 
 pub fn main() !void {
-    //var gpa = std.heap.GeneralPurposeAllocator(.{ .stack_trace_frames = 15 }){};
-    //const allocator = gpa.allocator();
-    //defer {
-    //    _ = gpa.deinit();
-    //}
     const allocator = std.heap.c_allocator;
-    //var arena = std.heap.ArenaAllocator.init(gallocator);
-    //defer arena.deinit();
-    //const allocator = arena.allocator();
 
     var g = Grammar.init(allocator);
     defer g.deinit();
@@ -1083,8 +1077,10 @@ test "expressions" {
         .{ .e = try grammar.createSequence("", &[_]*Expression{ a, try grammar.createNot("", b), c }), .i = "ac", .o = "[ac]" },
         .{ .e = try grammar.createSequence("", &[_]*Expression{ a, try grammar.createLookahead("", b), b }), .i = "ab", .o = "[a[b]b]" },
     };
+
     var nodeStr = std.ArrayList(u8).init(allocator);
     defer nodeStr.deinit();
+
     for (cases) |case| {
         const tree = try grammar.parseWith(case.i, case.e);
         try nodeToString(tree.?.root.?.children.items[0], &nodeStr);
@@ -1123,12 +1119,6 @@ test "expression parse fails" {
 }
 
 test "grammar parsing" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
-    var grammar = Grammar.init(allocator);
-    _ = try grammar.bootstrap();
-    var exprStr = std.ArrayList(u8).init(allocator);
-    defer exprStr.deinit();
     const cases = &[_]struct {
         i: []const u8, // input
         o: []const u8, // output
@@ -1159,6 +1149,14 @@ test "grammar parsing" {
         .{ .i = "a = a / b c", .o = "c[rfs[rfrf]]" },
         .{ .i = "a = a / b / c / a", .o = "c[rfrfrfrf]" },
     };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+    var grammar = Grammar.init(allocator);
+    _ = try grammar.bootstrap();
+
+    var exprStr = std.ArrayList(u8).init(allocator);
+    defer exprStr.deinit();
     for (cases) |case| {
         const tree = try grammar.parse(case.i);
         try std.testing.expectEqual(case.i.len, tree.?.root.?.children.items[0].value.end);

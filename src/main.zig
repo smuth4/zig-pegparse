@@ -888,6 +888,20 @@ const Grammar = struct {
                     }
                 }
             },
+            .quantity => |c| {
+                var child = c.child;
+                switch (child.*.matcher) {
+                    // Cut out any references with direct pointers
+                    .reference => |r| {
+                        if (self.references.get(r.target)) |*ref| {
+                            child = ref.*;
+                        }
+                    },
+                    else => {
+                        self.optimizeInner(child);
+                    },
+                }
+            },
             .sequence => |c| {
                 for (c.children.items) |*child| {
                     switch (child.*.matcher) {

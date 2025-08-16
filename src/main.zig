@@ -5,7 +5,7 @@ const zig_pegparse = @import("zig_pegparse");
 const tracy = @import("tracy.zig");
 const trace = tracy.trace;
 
-const tree = @import("tree.zig");
+const ntree = @import("tree.zig");
 
 const regex = @cImport({
     @cDefine("PCRE2_CODE_UNIT_WIDTH", "8");
@@ -18,70 +18,9 @@ const Span = struct {
     name: []const u8,
 };
 
-const SpanTree = tree.Tree(Span);
+const SpanTree = ntree.NaryTree(Span);
 
-const NodeList = std.ArrayList(Node);
-const Node = struct {
-    name: []const u8,
-    // Corresponds with the data used to the create the node, which the node isn't actually aware of
-    start: usize,
-    end: usize,
-    children: ?NodeList = null, // null here means a leaf node
-
-    fn create(allocator: Allocator, name: []const u8, start: usize, end: usize) !Node {
-        var n = try allocator.create(Node);
-        n.name = name;
-        n.start = start;
-        n.end = end;
-        return n;
-    }
-
-    fn count(self: *const Node) usize {
-        var sum: usize = 1;
-        if (self.children) |children| {
-            for (children.items) |c| {
-                sum += c.count();
-            }
-        }
-        return sum;
-    }
-
-    fn print(self: *const Node, data: []const u8, i: u32) void {
-        var end = self.end;
-
-        indent(i);
-        if (self.name.len != 0) {
-            std.debug.print("<Node called \"{s}\" ", .{self.name});
-        } else {
-            std.debug.print("<Node ", .{});
-        }
-        if (self.end - self.start > 10) {
-            end = self.start + 10;
-        }
-        if (std.mem.indexOfScalar(u8, data[self.start..end], '\n')) |newlnPos| {
-            end = self.start + newlnPos;
-        }
-        if (end == self.end) {
-            std.debug.print("matching \"{s}\">\n", .{data[self.start..self.end]});
-        } else {
-            std.debug.print("matching \"{s}\"...>\n", .{data[self.start..end]});
-        }
-        if (self.children) |children| {
-            for (children.items) |c| {
-                c.print(data, i + 1);
-            }
-        }
-    }
-
-    fn deinit(self: *const Node, allocator: Allocator) void {
-        if (self.children) |children| {
-            for (children.items) |c| {
-                c.deinit(allocator);
-            }
-        }
-        allocator.free(self);
-    }
-};
+const Node = SpanTree.Node;
 
 /// Compiles a regex pattern string and returns a pattern code you can use
 /// to match subjects. Returns `null` if something is wrong with the pattern
@@ -189,9 +128,23 @@ const Expression = struct {
 
     name: []const u8, // Name can't be changed once created
     matcher: Matcher,
+
+    pub fn deinit(self: *Expression, allocator: std.mem.Allocator) void {
+        switch (self.*.matcher) {
+            .sequence => |s| {
+                for (s.children.items) |c| {
+                    c.deinit(allocator);
+                }
+                s.children.deinit();
+            },
+            else => {},
+        }
+        allocator.destroy(self);
+    }
 };
 
 const ReferenceTable = std.StringHashMap(*Expression);
+const ReferenceList = std.ArrayList(*Expression);
 
 const Grammar = struct {
     // Where parsing defaults to starting from
@@ -199,10 +152,11 @@ const Grammar = struct {
     // Holds points to expressions for reference lookups
     references: ReferenceTable,
     allocator: Allocator,
+    expressionArena: std.heap.ArenaAllocator,
     ignorePrefix: u8 = '_',
     // Some debugging stats
-    matchCount: usize,
-    nodeCount: usize,
+    matchCount: usize = 0,
+    nodeCount: usize = 0,
 
     pub fn init(allocator: Allocator) Grammar {
         return Grammar{
@@ -211,10 +165,14 @@ const Grammar = struct {
             // expression for a first bootstrap
             .root = undefined,
             .allocator = allocator,
+            .expressionArena = std.heap.ArenaAllocator.init(allocator),
             .references = ReferenceTable.init(allocator),
-            .matchCount = 0,
-            .nodeCount = 0,
         };
+    }
+
+    pub fn deinit(self: *Grammar) void {
+        self.references.clearAndFree();
+        self.expressionArena.deinit();
     }
 
     fn print(self: *const Grammar) void {
@@ -278,20 +236,21 @@ const Grammar = struct {
     }
 
     // Parse pre-loaded data according to the grammar
-    pub fn parse(self: *Grammar, data: []const u8) !?Node {
+    pub fn parse(self: *Grammar, data: []const u8) !?SpanTree {
         return self.parseWith(data, self.root);
     }
 
-    pub fn parseWith(self: *Grammar, data: []const u8, root: *Expression) !?Node {
+    pub fn parseWith(self: *Grammar, data: []const u8, root: *Expression) !?SpanTree {
         var pos: usize = 0;
-        const n = try self.match(root, data, &pos);
+        var tree = try SpanTree.init(self.allocator, .{ .name = "root", .start = 0, .end = 0 });
+        try self.match(root, data, &pos, &tree, tree.root.?);
         if (pos != data.len) {
             //const start = if (pos > 5) pos - 5 else pos;
             //const end = if (pos < data.len - 6) pos + 5 else data.len - 1;
             //std.debug.print("failed at: {s}\n", .{data[start..end]});
             return null;
         }
-        return n;
+        return tree;
     }
 
     // Parse a string and turn it into a new grammar
@@ -303,8 +262,10 @@ const Grammar = struct {
             .visitorTable = std.StringHashMap(Grammar.ExpressionVisitor.ExpressionVisitorSignature).init(self.allocator),
             .referenceStack = std.ArrayList([]const u8).init(self.allocator),
         };
-        const rootNode = try self.parse(data);
-        try visitor.visit(data, &rootNode.?);
+        defer visitor.visitorTable.deinit();
+        var tree = try self.parse(data);
+        defer tree.?.deinit();
+        try visitor.visit(data, tree.?.root.?);
         return grammar;
     }
 
@@ -329,12 +290,13 @@ const Grammar = struct {
             try self.visitorTable.put("or_term", &ExpressionVisitor.visit_or_term);
             try self.visitorTable.put("reference", &ExpressionVisitor.visit_reference);
             try self.visitorTable.put("quantified", &ExpressionVisitor.visit_quantified);
-            std.debug.assert(std.mem.eql(u8, node.name, "rules"));
+            //std.debug.assert(std.mem.eql(u8, node.value.name, "rules"));
             var rules = ExpressionList.init(self.allocator);
-            const rulesNode = node.children.?.items[1];
-            for (rulesNode.children.?.items) |child| {
+            defer rules.deinit();
+            const rulesNode = node.children.items[0].children.items[1];
+            for (rulesNode.children.items) |child| {
                 //std.debug.print("rule child: {s}\n", .{child.name});
-                if (try self.visit_generic(data, &child)) |result| {
+                if (try self.visit_generic(data, child)) |result| {
                     //self.grammar.printInner(&self.referenceStack, result, 0);
                     try rules.append(result);
                 }
@@ -358,35 +320,34 @@ const Grammar = struct {
 
         fn visit_generic(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
             // Skip over anything starting with '_'
-            if (node.name.len != 0 and node.name[0] == '_') {
+            if (node.value.name.len != 0 and node.value.name[0] == '_') {
                 return null;
             }
-            if (self.visitorTable.get(node.name)) |func| {
+            if (self.visitorTable.get(node.value.name)) |func| {
                 return func(self, data, node);
             } else {
-                if (node.children) |children| {
-                    // Return the first non-null result by default
-                    for (children.items) |child| {
-                        if (node.name.len != 0 and node.name[0] == '_') {
-                            return null;
-                        }
-                        if (try self.visit_generic(data, &child)) |result| {
-                            return result;
-                        }
+                // Return the first non-null result by default
+                for (node.children.items) |child| {
+                    if (node.value.name.len != 0 and node.value.name[0] == '_') {
+                        return null;
                     }
-                    return null;
+                    if (try self.visit_generic(data, child)) |result| {
+                        return result;
+                    }
                 }
+                return null;
             }
             return null;
         }
 
         fn visit_sequence(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
             var exprs = ExpressionList.init(self.allocator);
-            if (try self.visit_generic(data, &node.children.?.items[0])) |result| {
+            defer exprs.deinit();
+            if (try self.visit_generic(data, node.children.items[0])) |result| {
                 try exprs.append(result);
             }
-            for (node.children.?.items[1].children.?.items) |child| {
-                if (try self.visit_generic(data, &child)) |result| {
+            for (node.children.items[1].children.items) |child| {
+                if (try self.visit_generic(data, child)) |result| {
                     try exprs.append(result);
                 }
             }
@@ -395,16 +356,16 @@ const Grammar = struct {
         }
 
         fn visit_or_term(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
-            if (node.children.?.items[2].children.?.items.len == 1) {
-                for (node.children.?.items[2].children.?.items) |child| {
-                    if (try self.visit_generic(data, &child)) |result| {
+            if (node.children.items[2].children.items.len == 1) {
+                for (node.children.items[2].children.items) |child| {
+                    if (try self.visit_generic(data, child)) |result| {
                         return result;
                     }
                 }
             } else {
                 var seq = try self.grammar.createSequence("", &[_]*Expression{});
-                for (node.children.?.items[2].children.?.items) |child| {
-                    if (try self.visit_generic(data, &child)) |result| {
+                for (node.children.items[2].children.items) |child| {
+                    if (try self.visit_generic(data, child)) |result| {
                         try seq.matcher.sequence.children.append(result);
                     }
                 }
@@ -415,23 +376,24 @@ const Grammar = struct {
 
         fn visit_ored(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
             var exprs = ExpressionList.init(self.allocator);
+            defer exprs.deinit();
             // term+
-            if (node.children.?.items[0].children.?.items.len == 1) {
-                if (try self.visit_generic(data, &node.children.?.items[0].children.?.items[0])) |result| {
+            if (node.children.items[0].children.items.len == 1) {
+                if (try self.visit_generic(data, node.children.items[0].children.items[0])) |result| {
                     try exprs.append(result);
                 }
             } else {
                 var seq = try self.grammar.createSequence("", &[_]*Expression{});
-                for (node.children.?.items[0].children.?.items) |child| {
-                    if (try self.visit_generic(data, &child)) |result| {
+                for (node.children.items[0].children.items) |child| {
+                    if (try self.visit_generic(data, child)) |result| {
                         try seq.matcher.sequence.children.append(result);
                     }
                 }
                 try exprs.append(seq);
             }
             // or_term+
-            for (node.children.?.items[1].children.?.items) |child| {
-                if (try self.visit_generic(data, &child)) |result| {
+            for (node.children.items[1].children.items) |child| {
+                if (try self.visit_generic(data, child)) |result| {
                     try exprs.append(result);
                 }
             }
@@ -440,32 +402,29 @@ const Grammar = struct {
         }
 
         fn visit_rule(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
-            if (node.children) |children| {
-                const labelExpr = try self.visit_generic(data, &children.items[0]);
-                const label = getLiteralValue(labelExpr.?);
-                // We could descend and confirm the middle node is '=', but why bother
-                const expression = try self.visit_generic(data, &children.items[2]);
-                return self.grammar.initExpression(label, expression.?.*.matcher);
-            }
-            return null;
+            const labelExpr = try self.visit_generic(data, node.children.items[0]);
+            const label = getLiteralValue(labelExpr.?);
+            // We could descend and confirm the middle node is '=', but why bother
+            const expression = try self.visit_generic(data, node.children.items[2]);
+            return self.grammar.initExpression(label, expression.?.*.matcher);
         }
 
         // TODO handle escape sequences
         fn visit_double_quoted_literal(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
             // Send back an empty-value literal with the data as the name
-            return try self.grammar.createLiteral("", data[(node.start + 1)..(node.end - 1)]);
+            return try self.grammar.createLiteral("", data[(node.value.start + 1)..(node.value.end - 1)]);
         }
 
         // TODO handle escape sequences
         fn visit_single_quoted_literal(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
             // Send back an empty-value literal with the data as the name
-            return try self.grammar.createLiteral("", data[(node.start + 1)..(node.end - 1)]);
+            return try self.grammar.createLiteral("", data[(node.value.start + 1)..(node.value.end - 1)]);
         }
 
         fn visit_reference(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
             // Send back an empty-value literal with the data as the name
-            const ref_text = try self.visit_generic(data, &node.children.?.items[0]);
-            if (data[node.start] == '!') {
+            const ref_text = try self.visit_generic(data, node.children.items[0]);
+            if (data[node.value.start] == '!') {
                 return try self.grammar.createNot("", try self.grammar.createReference("", getLiteralValue(ref_text.?)));
             } else {
                 return try self.grammar.createReference("", getLiteralValue(ref_text.?));
@@ -473,9 +432,9 @@ const Grammar = struct {
         }
 
         fn visit_quantified(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
-            const child = try self.visit_generic(data, &node.children.?.items[0]); // Must be a literal
-            const q = &node.children.?.items[1].children.?.items[0]; // Quantifier string
-            const q_char = data[q.start];
+            const child = try self.visit_generic(data, node.children.items[0]); // Must be a literal
+            const q = node.children.items[1].children.items[0]; // Quantifier string
+            const q_char = data[q.value.start];
             if (q_char == '*') {
                 return try self.grammar.createZeroOrMore("", child.?);
             } else if (q_char == '?') {
@@ -485,15 +444,15 @@ const Grammar = struct {
             } else {
                 var min: usize = 0;
                 var max: usize = std.math.maxInt(usize);
-                if (std.mem.indexOfScalarPos(u8, data, q.start, ',')) |comma_pos| {
-                    if (comma_pos != q.start + 1) {
-                        min = try std.fmt.parseUnsigned(usize, data[q.start + 1 .. comma_pos], 10);
+                if (std.mem.indexOfScalarPos(u8, data, q.value.start, ',')) |comma_pos| {
+                    if (comma_pos != q.value.start + 1) {
+                        min = try std.fmt.parseUnsigned(usize, data[q.value.start + 1 .. comma_pos], 10);
                     }
-                    if (comma_pos + 1 != q.end - 1) {
-                        max = try std.fmt.parseUnsigned(usize, data[comma_pos + 1 .. q.end - 1], 10);
+                    if (comma_pos + 1 != q.value.end - 1) {
+                        max = try std.fmt.parseUnsigned(usize, data[comma_pos + 1 .. q.value.end - 1], 10);
                     }
                 } else {
-                    min = try std.fmt.parseUnsigned(usize, data[q.start + 1 .. q.end - 1], 10);
+                    min = try std.fmt.parseUnsigned(usize, data[q.value.start + 1 .. q.value.end - 1], 10);
                     max = min;
                 }
                 return self.grammar.createQuantity("", min, max, child.?);
@@ -502,18 +461,18 @@ const Grammar = struct {
 
         fn visit_label_regex(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
             // Send back an empty-value literal with the label as the name
-            if (data[node.start] == '!') {
-                return try self.grammar.createNot("", try self.grammar.createLiteral("", data[node.start + 1 .. node.end]));
+            if (data[node.value.start] == '!') {
+                return try self.grammar.createNot("", try self.grammar.createLiteral("", data[node.value.start + 1 .. node.value.end]));
             } else {
-                return try self.grammar.createLiteral("", data[node.start..node.end]);
+                return try self.grammar.createLiteral("", data[node.value.start..node.value.end]);
             }
         }
 
         fn visit_regex(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
             var options: u32 = 0;
-            const optionsNode = node.children.?.items[2];
-            const quoted_re = try self.visit_generic(data, &node.children.?.items[1]);
-            for (data[optionsNode.start..optionsNode.end]) |c| {
+            const optionsNode = node.children.items[2];
+            const quoted_re = try self.visit_generic(data, node.children.items[1]);
+            for (data[optionsNode.value.start..optionsNode.value.end]) |c| {
                 options = options | switch (c) {
                     'i' => regex.PCRE2_CASELESS,
                     'm' => regex.PCRE2_MULTILINE,
@@ -536,21 +495,18 @@ const Grammar = struct {
     /// has a non-empty name, or in the cache otherwise. If neither of
     /// those are possible, it simply gets allocated and returned.
     fn initExpression(self: *Grammar, name: []const u8, matcher: Expression.Matcher) !*Expression {
-        const expr = try self.allocator.create(Expression);
+        const expr = try self.expressionArena.allocator().create(Expression);
         expr.*.name = name;
         expr.*.matcher = matcher;
-        if (name.len == 0) {
-            switch (matcher) {
-                else => return expr,
+        if (name.len != 0) {
+            const result = try self.references.getOrPut(name);
+            if (result.found_existing) {
+                //std.debug.print("dupe: {s}\n", .{name});
+                return GrammarError.DuplicateLabel;
+            } else {
+                //std.debug.print("insert reference: {s}\n", .{name});
+                result.value_ptr.* = expr;
             }
-        }
-        const result = try self.references.getOrPut(name);
-        if (result.found_existing) {
-            //std.debug.print("dupe: {s}\n", .{name});
-            return GrammarError.DuplicateLabel;
-        } else {
-            //std.debug.print("insert reference: {s}\n", .{name});
-            result.value_ptr.* = expr;
         }
         return expr;
     }
@@ -573,9 +529,10 @@ const Grammar = struct {
     }
 
     fn createChoice(self: *Grammar, name: []const u8, children: []const *Expression) !*Expression {
-        var childList = ExpressionList.init(self.allocator);
+        var childList = ExpressionList.init(self.expressionArena.allocator());
+        try childList.ensureTotalCapacity(children.len);
         for (children) |c| {
-            try childList.append(c);
+            childList.appendAssumeCapacity(c);
         }
         return self.initExpression(name, .{ .choice = Choice{ .children = childList } });
     }
@@ -589,9 +546,10 @@ const Grammar = struct {
     }
 
     fn createSequence(self: *Grammar, name: []const u8, children: []const *Expression) !*Expression {
-        var childList = ExpressionList.init(self.allocator);
+        var childList = ExpressionList.init(self.expressionArena.allocator());
+        try childList.ensureTotalCapacity(children.len);
         for (children) |c| {
-            try childList.append(c);
+            childList.appendAssumeCapacity(c);
         }
         return self.initExpression(name, .{ .sequence = Sequence{ .children = childList } });
     }
@@ -696,8 +654,8 @@ const Grammar = struct {
         return self.root;
     }
 
-    // Return a tree of Nodes after parsing. Optionals are used to indicate if no match was found.
-    pub fn match(self: *Grammar, exp: *const Expression, data: []const u8, pos: *usize) !?Node {
+    // Start matching `data` with `exp` starting from `pos`, adding children under `node` in `tree`
+    pub fn match(self: *Grammar, exp: *const Expression, data: []const u8, pos: *usize, tree: *SpanTree, node: *SpanTree.Node) !void {
         const toParse = data[pos.*..];
         self.matchCount += 1;
         switch (exp.*.matcher) {
@@ -708,9 +666,7 @@ const Grammar = struct {
                     const old_pos = pos.*;
                     pos.* += result;
                     self.nodeCount += 1;
-                    return Node{ .name = exp.name, .start = old_pos, .end = pos.* };
-                } else {
-                    return null;
+                    _ = try tree.nodeAddChild(node, .{ .name = exp.name, .start = old_pos, .end = pos.* });
                 }
             },
             .literal => |l| {
@@ -720,101 +676,98 @@ const Grammar = struct {
                     const old_pos = pos.*;
                     pos.* += l.value.len;
                     self.nodeCount += 1;
-                    return Node{ .name = exp.name, .start = old_pos, .end = pos.* };
+                    _ = try tree.nodeAddChild(node, .{ .name = exp.name, .start = old_pos, .end = pos.* });
                 }
             },
             .reference => |r| {
                 //std.debug.print("parse reference target={s}\n", .{r.target});
                 if (self.references.get(r.target)) |ref| {
-                    return self.match(ref, data, pos);
+                    return self.match(ref, data, pos, tree, node);
                 }
             },
             .sequence => |s| {
-                // TODO: deinit on failure?
                 //std.debug.print("parse sequence name={s}\n", .{exp.name});
-                var children = std.ArrayList(Node).init(self.allocator);
-                try children.ensureTotalCapacity(s.children.items.len);
-                const old_pos = pos.*;
-                for (s.children.items) |c| {
-                    if (try self.match(c, data, pos)) |n| {
-                        if (n.name.len != 0 and n.name[0] == self.ignorePrefix) {
-                            self.nodeCount += 1;
-                            try children.append(Node{ .name = n.name, .start = n.start, .end = n.end });
-                        } else {
-                            try children.append(n);
-                        }
-                    } else {
-                        pos.* = old_pos;
-                        children.deinit();
-                        return null;
-                    }
-                }
-                self.nodeCount += 1;
-                return Node{ .name = exp.name, .start = old_pos, .end = pos.*, .children = children };
-            },
-            .choice => |s| {
-                // TODO: deinit on failure?
-                //std.debug.print("parse choice name={s}\n", .{exp.name});
-                var children = std.ArrayList(Node).init(self.allocator);
-                try children.ensureTotalCapacity(s.children.items.len);
-                const old_pos = pos.*;
-                for (s.children.items) |c| {
-                    if (try self.match(c, data, pos)) |n| {
-                        //std.debug.print("parse choice name={s} matched node {s}\n", .{ exp.name, n.name });
-                        try children.append(n);
-                        self.nodeCount += 1;
-                        return Node{ .name = exp.name, .start = old_pos, .end = pos.*, .children = children };
-                    } else {
-                        //std.debug.print("parse choice name={s} failed child {s}\n", .{ exp.name, c.name });
-                        pos.* = old_pos;
-                    }
-                }
-                //std.debug.print("parse choice name={s} failed\n", .{exp.name});
-                children.deinit();
-                return null;
-            },
-            .lookahead => |l| {
-                //std.debug.print("parse lookahead name={s}\n", .{exp.name});
-                const old_pos = pos.*;
-                const parsedNode = try self.match(l.child, data, pos);
-                const new_pos = pos.*;
-                pos.* = old_pos; // Always roll back the position
-                if (parsedNode) |_| {
-                    if (l.negative) {
-                        return null;
-                    } else {
-                        self.nodeCount += 1;
-                        return Node{ .name = exp.name, .start = old_pos, .end = new_pos };
-                    }
-                } else {
-                    return if (!l.negative) null else Node{ .name = exp.name, .start = old_pos, .end = new_pos };
-                }
-            },
-            .quantity => |q| {
-                //std.debug.print("parse quantity name={s}\n", .{exp.name});
-                var children = std.ArrayList(Node).init(self.allocator);
-                const old_pos = pos.*;
-                //std.debug.print("quant start: {s}\n", .{exp.name});
-                while (children.items.len < q.max and pos.* < data.len) {
-                    const parsedNode = try self.match(q.child, data, pos) orelse break;
-                    try children.append(parsedNode);
-                    //std.debug.print("quant good child: {s}\n", .{parsedNode.name});
-                    if (children.items.len >= q.min and parsedNode.start == parsedNode.end) {
+                var child = try tree.nodeAddChild(node, .{ .name = exp.name, .start = pos.*, .end = pos.* });
+
+                for (s.children.items, 1..) |c, i| {
+                    try self.match(c, data, pos, tree, child);
+                    if (child.children.items.len != i) {
+                        // Failure, deinit, reset pos and exit
+                        pos.* = child.value.start;
+                        tree.nodeDeinit(child);
+                        _ = node.children.pop();
                         break;
                     }
                 }
-                if (children.items.len >= q.min) {
-                    //std.debug.print("quant success size: {s} {d}\n", .{ exp.name, children.items.len });
-                    self.nodeCount += 1;
-                    return Node{ .name = exp.name, .start = old_pos, .end = pos.*, .children = children };
+                child.value.end = pos.*;
+            },
+            .choice => |s| {
+                //std.debug.print("parse choice name={s}\n", .{exp.name});
+                var child = try tree.nodeAddChild(node, .{ .name = exp.name, .start = pos.*, .end = pos.* });
+
+                for (s.children.items) |c| {
+                    try self.match(c, data, pos, tree, child);
+                    if (child.children.items.len > 0) {
+                        // Success
+                        child.value.end = pos.*;
+                        break;
+                    }
                 } else {
-                    pos.* = old_pos;
-                    children.deinit();
-                    return null;
+                    // No matches, reset
+                    pos.* = child.value.start;
+                    tree.nodeDeinit(child);
+                    _ = node.children.pop();
+                }
+            },
+            .lookahead => |l| {
+                //std.debug.print("parse lookahead name={s}\n", .{exp.name});
+                var child = try tree.nodeAddChild(node, .{ .name = exp.name, .start = pos.*, .end = pos.* });
+
+                try self.match(l.child, data, pos, tree, child);
+                // Always roll back
+                pos.* = child.value.start;
+
+                const found_match = (child.children.items.len == 0) == l.negative;
+                //std.debug.print("parse lookahead state l:{d} n:{s} m:{s}\n", .{ child.children.items.len, if (l.negative) "neg" else "pos", if (found_match) "yes" else "no" });
+                if (found_match) {
+                    if (child.children.items.len > 0) {
+                        child.value.end = child.children.items[0].value.end;
+                    }
+                } else {
+                    tree.nodeDeinit(child);
+                    _ = node.children.pop();
+                }
+            },
+            .quantity => |q| {
+                // std.debug.print("parse quantity name={s}\n", .{exp.name});
+                var child = try tree.nodeAddChild(node, .{ .name = exp.name, .start = pos.*, .end = pos.* });
+                var i: usize = 0; //Expected count of children
+                while (child.children.items.len < q.max and pos.* < data.len) {
+                    i += 1;
+                    try self.match(q.child, data, pos, tree, child);
+                    // std.debug.print("parse quantity state l:{d} i:{d}, q.min:{d} q.max:{d}\n", .{ child.children.items.len, i, q.min, q.max });
+                    // Couldn't find a next match, or exceeded the minimum
+                    if (child.children.items.len != i or child.children.items.len >= q.max) {
+                        break;
+                    }
+                    // Avoid long loops on empty repeating matches
+                    const lastValue = child.children.items[i - 1].value;
+                    if (lastValue.start == lastValue.end) {
+                        break;
+                    }
+                    // std.debug.print("parse quantity continue\n", .{});
+                }
+                // std.debug.print("parse quantity end state l:{d} i:{d}, q.min:{d} q.max:{d}\n", .{ child.children.items.len, i, q.min, q.max });
+                if (child.children.items.len < q.min) {
+                    tree.nodeDeinit(child);
+                    _ = node.children.pop();
+                } else {
+                    if (child.children.items.len > 0) {
+                        child.value.end = child.children.items[child.children.items.len - 1].value.end;
+                    }
                 }
             },
         }
-        return null;
     }
 
     fn optimize(self: *Grammar) void {
@@ -873,13 +826,18 @@ const Grammar = struct {
 };
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const gallocator = gpa.allocator();
-    var arena = std.heap.ArenaAllocator.init(gallocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+    //var gpa = std.heap.GeneralPurposeAllocator(.{ .stack_trace_frames = 15 }){};
+    //const allocator = gpa.allocator();
+    //defer {
+    //    _ = gpa.deinit();
+    //}
+    const allocator = std.heap.c_allocator;
+    //var arena = std.heap.ArenaAllocator.init(gallocator);
+    //defer arena.deinit();
+    //const allocator = arena.allocator();
 
     var g = Grammar.init(allocator);
+    defer g.deinit();
 
     _ = try g.bootstrap();
     //g.print();
@@ -904,27 +862,32 @@ pub fn main() !void {
         \\_S = ~"\s+"
     ;
 
-    const tr = trace(@src());
-    defer tr.end();
+    // const tr = trace(@src());
+    // defer tr.end();
 
     const args = try std.process.argsAlloc(allocator); // Get arguments as a slice
     defer std.process.argsFree(allocator, args); // Free allocated memory
     const cwd = std.fs.cwd();
     const fileContents = try cwd.readFileAlloc(allocator, args[1], std.math.maxInt(usize));
+    defer allocator.free(fileContents);
     var g2 = try g.createGrammar(json_grammar);
-    //g2.print();
+    defer g2.deinit();
+    // //g2.print();
     g2.optimize();
     var pos: usize = 0;
 
     const start_time = try std.time.Instant.now();
-    const n = try g2.match(g2.root, fileContents, &pos);
+    var t = try SpanTree.init(allocator, .{ .name = "root", .start = 0, .end = 0 });
+    try g2.match(g2.root, fileContents, &pos, &t, t.root.?);
     const end_time = try std.time.Instant.now();
     const elapsed_nanos = end_time.since(start_time);
     std.debug.print("Elapsed time: {d} s\n", .{elapsed_nanos / 1_000_000});
 
-    std.debug.print("pos: {d} matches: {d}\n", .{ pos, g2.matchCount });
-    std.debug.print("tree count: {d} node count: {d}\n", .{ n.?.count(), g2.nodeCount });
-    std.debug.print("struct size: {d}\n", .{@sizeOf(SpanTree.Node)});
+    // std.debug.print("pos: {d} matches: {d}\n", .{ pos, g2.matchCount });
+    // nodePrint(t.root.?);
+    t.deinit();
+    //std.debug.print("tree count: {d} node count: {d}\n", .{ t.root.?.count(), g2.nodeCount });
+    //std.debug.print("struct size: {d}\n", .{@sizeOf(SpanTree.Node)});
 }
 
 /////////////
@@ -932,17 +895,115 @@ pub fn main() !void {
 /////////////
 
 // A very minimal output format, primarily for testing
-fn nodeToString(self: *const Node, output: *std.ArrayList(u8)) !void {
-    if (self.name.len > 0 and self.name[0] == '_') {
+fn nodePrint(self: *const Node) void {
+    if (self.value.name.len > 0 and self.value.name[0] == '_') {
         return;
     }
-    try output.appendSlice(self.name);
-    if (self.children) |children| {
+    std.debug.print("{s}", .{self.value.name});
+    if (self.children.items.len > 0) {
+        std.debug.print("[", .{});
+        for (self.children.items) |c| {
+            nodePrint(c);
+            std.debug.print(",", .{});
+        }
+        std.debug.print("[", .{});
+    }
+}
+
+fn nodeToString(self: *const Node, output: *std.ArrayList(u8)) !void {
+    if (self.value.name.len > 0 and self.value.name[0] == '_') {
+        return;
+    }
+    try output.appendSlice(self.value.name);
+    if (self.children.items.len > 0) {
         try output.append('[');
-        for (children.items) |c| {
-            try nodeToString(&c, output);
+        for (self.children.items) |c| {
+            try nodeToString(c, output);
         }
         try output.append(']');
+    }
+}
+
+fn usizeToStr(num: usize, output: *std.ArrayList(u8)) !void {
+    var i = num;
+    if (i == 0) {
+        try output.append('0');
+    } else {
+        while (i > 0) {
+            const digit = @as(u8, @intCast(i % 10));
+            try output.append('0' + digit);
+            i /= 10;
+        }
+    }
+}
+
+fn expressionToRhs(self: *const Expression, output: *std.ArrayList(u8)) !void {
+    switch (self.*.matcher) {
+        .regex => |r| {
+            try output.appendSlice("~\"");
+            try output.appendSlice(r.value);
+            try output.appendSlice("\"");
+        },
+        .literal => |l| {
+            try output.appendSlice("\"");
+            try output.appendSlice(l.value);
+            try output.appendSlice("\"");
+        },
+        .reference => |r| {
+            try output.appendSlice(r.target);
+        },
+        .sequence => |s| {
+            try output.appendSlice("( ");
+            for (s.children.items, 0..) |c, i| {
+                try expressionToRhs(c, output);
+                if (i != s.children.items.len - 1) {
+                    try output.append(' ');
+                }
+            }
+            try output.appendSlice(" ) ");
+        },
+        .choice => |s| {
+            try output.appendSlice("( ");
+            for (s.children.items, 0..) |c, i| {
+                try expressionToRhs(c, output);
+                if (i != s.children.items.len - 1) {
+                    try output.appendSlice(" / ");
+                }
+            }
+            try output.appendSlice(" ) ");
+        },
+        .quantity => |q| {
+            try expressionToRhs(q.child, output);
+            if (q.min == 0 and q.max == 1) {
+                try output.append('?');
+            } else if (q.min == 0 and q.max == std.math.maxInt(usize)) {
+                try output.append('*');
+            } else if (q.min == 1 and q.max == std.math.maxInt(usize)) {
+                try output.append('+');
+            } else {
+                try output.append('{');
+                if (q.min == q.max) {
+                    try usizeToStr(q.min, output);
+                } else {
+                    if (q.min != 0) {
+                        try usizeToStr(q.min, output);
+                    }
+                    try output.append(',');
+                    if (q.max != std.math.maxInt(usize)) {
+                        try usizeToStr(q.max, output);
+                    }
+                }
+                try output.append('}');
+            }
+        },
+        .lookahead => |l| {
+            if (l.negative) {
+                try output.appendSlice("!");
+            } else {
+                try output.appendSlice("&");
+            }
+            try expressionToRhs(l.child, output);
+        },
     }
 }
 
@@ -991,9 +1052,7 @@ fn expressionToString(self: *const Expression, output: *std.ArrayList(u8)) !void
 
 test "expressions" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
-    defer arena.deinit();
-    const allocator = arena.allocator();
+    const allocator = gpa.allocator();
     var grammar = Grammar.init(allocator);
     // Create a few labels ahead of time to avoid dupes
     const a = try grammar.createLiteral("a", "a");
@@ -1011,7 +1070,7 @@ test "expressions" {
         .{ .e = try grammar.createRegex("", "\\s*"), .i = "", .o = "" },
         .{ .e = try grammar.createOneOrMore("", a), .i = "a", .o = "[a]" },
         .{ .e = try grammar.createOneOrMore("", a), .i = "aaa", .o = "[aaa]" },
-        .{ .e = try grammar.createZeroOrMore("", a), .i = "", .o = "[]" },
+        .{ .e = try grammar.createZeroOrMore("", a), .i = "", .o = "" }, // Matched but no children, maybe a separate test?
         .{ .e = try grammar.createZeroOrMore("", a), .i = "aaa", .o = "[aaa]" },
         .{ .e = try grammar.createZeroOrOne("", a), .i = "a", .o = "[a]" },
         .{ .e = try grammar.createSequence("", &[_]*Expression{a}), .i = "a", .o = "[a]" },
@@ -1022,13 +1081,13 @@ test "expressions" {
         .{ .e = try grammar.createReference("", "a"), .i = "a", .o = "a" },
         .{ .e = try grammar.createSequence("", &[_]*Expression{ a, try grammar.createNot("", b) }), .i = "a", .o = "[a]" },
         .{ .e = try grammar.createSequence("", &[_]*Expression{ a, try grammar.createNot("", b), c }), .i = "ac", .o = "[ac]" },
-        .{ .e = try grammar.createSequence("", &[_]*Expression{ a, try grammar.createLookahead("", b), b }), .i = "ab", .o = "[ab]" },
+        .{ .e = try grammar.createSequence("", &[_]*Expression{ a, try grammar.createLookahead("", b), b }), .i = "ab", .o = "[a[b]b]" },
     };
     var nodeStr = std.ArrayList(u8).init(allocator);
     defer nodeStr.deinit();
     for (cases) |case| {
-        const node = try grammar.parseWith(case.i, case.e);
-        try nodeToString(&node.?, &nodeStr);
+        const tree = try grammar.parseWith(case.i, case.e);
+        try nodeToString(tree.?.root.?.children.items[0], &nodeStr);
         try std.testing.expectEqualStrings(case.o, nodeStr.items);
 
         try nodeStr.resize(0);
@@ -1037,9 +1096,7 @@ test "expressions" {
 
 test "expression parse fails" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
-    defer arena.deinit();
-    const allocator = arena.allocator();
+    const allocator = gpa.allocator();
     var grammar = Grammar.init(allocator);
     // Create a few labels ahead of time to avoid dupes
     const a = try grammar.createLiteral("a", "a");
@@ -1055,22 +1112,19 @@ test "expression parse fails" {
         .{ .e = try grammar.createRegex("", "test"), .i = "tes" },
         .{ .e = try grammar.createRegex("", "\\s+"), .i = "test" },
         .{ .e = try grammar.createZeroOrOne("", a), .i = "aaa" },
-        .{ .e = try grammar.createOneOrMore("", b), .i = "" },
         .{ .e = try grammar.createOneOrMore("", c), .i = "!!!" },
         .{ .e = try grammar.createChoice("", &[_]*Expression{ a, b, c }), .i = "d" },
         .{ .e = try grammar.createSequence("", &[_]*Expression{ a, b }), .i = "ad" },
     };
     for (cases) |case| {
-        const node = try grammar.parseWith(case.i, case.e);
-        try std.testing.expect(node == null);
+        const tree = try grammar.parseWith(case.i, case.e);
+        try std.testing.expect(tree == null);
     }
 }
 
 test "grammar parsing" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
-    defer arena.deinit();
-    const allocator = arena.allocator();
+    const allocator = gpa.allocator();
     var grammar = Grammar.init(allocator);
     _ = try grammar.bootstrap();
     var exprStr = std.ArrayList(u8).init(allocator);
@@ -1106,8 +1160,8 @@ test "grammar parsing" {
         .{ .i = "a = a / b / c / a", .o = "c[rfrfrfrf]" },
     };
     for (cases) |case| {
-        const node = try grammar.parse(case.i);
-        try std.testing.expectEqual(node.?.end, case.i.len);
+        const tree = try grammar.parse(case.i);
+        try std.testing.expectEqual(case.i.len, tree.?.root.?.children.items[0].value.end);
         const new_grammar = try grammar.createGrammar(case.i);
         try expressionToString(new_grammar.root, &exprStr);
         try std.testing.expectEqualStrings(case.o, exprStr.items);

@@ -138,37 +138,24 @@ const Expression = struct {
 
     name: []const u8, // Name can't be changed once created
     matcher: Matcher,
-
-    pub fn deinit(self: *Expression, allocator: std.mem.Allocator) void {
-        switch (self.*.matcher) {
-            .sequence => |s| {
-                for (s.children.items) |c| {
-                    c.deinit(allocator);
-                }
-                s.children.deinit();
-            },
-            else => {},
-        }
-        allocator.destroy(self);
-    }
 };
 
 const ReferenceTable = std.StringHashMap(*Expression);
 const ReferenceList = std.ArrayList(*Expression);
 
 const Grammar = struct {
+    // The main allocator, will also be used for expressionArena and the
+    // generated node tree by default.
     allocator: Allocator,
     // Where parsing defaults to starting from
     root: *Expression,
     // Holds points to expressions for reference lookups
     references: ReferenceTable,
-    // Expressions can be recursive and accidentally orphaned, but should be relatively small, hence a dedicated arena for them
+    // Expressions can be recursive and possibly orphans, but also are
+    // relatively small, hence a dedicated arena for them.
     expressionArena: std.heap.ArenaAllocator,
     ignorePrefix: u8 = '_',
     // Some debugging stats
-    matchCount: usize = 0,
-    nodeCount: usize = 0,
-    backtrackCount: usize = 0,
 
     pub fn init(allocator: Allocator) Grammar {
         return Grammar{

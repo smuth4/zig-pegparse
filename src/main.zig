@@ -53,15 +53,16 @@ fn find(regexp: *regex.pcre2_code_8, haystack: []const u8) ?usize {
     const rc: c_int = regex.pcre2_match_8(regexp, subject, subjLen, 0, regex.PCRE2_ANCHORED, matchData.?, null);
 
     if (rc < 0) {
+        regex.pcre2_match_data_free_8(matchData);
         return null;
     }
 
     if (rc == 0) {
         std.debug.print("ovector was not big enough for all the captured substrings\n", .{});
+        regex.pcre2_match_data_free_8(matchData);
         return null;
     }
     const ovector = regex.pcre2_get_ovector_pointer_8(matchData);
-    regex.pcre2_match_data_free_8(matchData);
 
     if (ovector[0] > ovector[1]) {
         std.debug.print("error with ovector\n", .{});

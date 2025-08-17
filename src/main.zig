@@ -576,8 +576,8 @@ const Grammar = struct {
 
         // Parsimonious bootstraps itself, which is fun, but manually
         // creating the grammar allows us to not have use references
-        const ws = try self.createRegex("ws", "\\s+");
-        const comment = try self.createRegex("comment", "#[^\r\n]*");
+        const ws = try self.createRegex("_ws", "\\s+");
+        const comment = try self.createRegex("_comment", "#[^\r\n]*");
         const ignore = try self.createZeroOrMore("_ignore", try self.createChoice(
             "",
             &[_]*Expression{ ws, comment },
@@ -660,7 +660,6 @@ const Grammar = struct {
     // Start matching `data` with `exp` starting from `pos`, adding children under `node` in `tree`
     pub fn match(self: *Grammar, exp: *const Expression, data: []const u8, pos: *usize, tree: *SpanTree, node: *SpanTree.Node) !void {
         const toParse = data[pos.*..];
-        self.matchCount += 1;
         switch (exp.*.matcher) {
             .regex => |r| {
                 //std.debug.print("parse regex name={s} value={s}\n", .{ exp.name, r.value });
@@ -668,7 +667,6 @@ const Grammar = struct {
                     //std.debug.print("parse regex match: {s}\n", .{toParse[0..result]});
                     const old_pos = pos.*;
                     pos.* += result;
-                    self.nodeCount += 1;
                     _ = try tree.nodeAddChild(node, .{ .expr = exp, .start = old_pos, .end = pos.* });
                 }
             },
@@ -678,7 +676,6 @@ const Grammar = struct {
                     //std.debug.print("match literal value={s}\n", .{l.value});
                     const old_pos = pos.*;
                     pos.* += l.value.len;
-                    self.nodeCount += 1;
                     _ = try tree.nodeAddChild(node, .{ .expr = exp, .start = old_pos, .end = pos.* });
                 }
             },
@@ -849,7 +846,6 @@ pub fn main() !void {
         \\False = "false"
         \\Null = "null"
         \\Number = ~"-?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?"
-        \\Number2 = Minus? IntegralPart FractionalPart? ExponentPart?
         \\Minus = "-"
         \\IntegralPart = "0" / ~"[1-9][0-9]*"
         \\FractionalPart = ~"\.[0-9]+"
@@ -857,17 +853,16 @@ pub fn main() !void {
         \\_S = ~"\s+"
     ;
 
-    // const tr = trace(@src());
-    // defer tr.end();
-
     const args = try std.process.argsAlloc(allocator); // Get arguments as a slice
     defer std.process.argsFree(allocator, args); // Free allocated memory
+
     const cwd = std.fs.cwd();
     const fileContents = try cwd.readFileAlloc(allocator, args[1], std.math.maxInt(usize));
     defer allocator.free(fileContents);
+
     var g2 = try g.createGrammar(json_grammar);
     defer g2.deinit();
-    // //g2.print();
+
     g2.optimize();
     var pos: usize = 0;
 
@@ -876,10 +871,9 @@ pub fn main() !void {
     try g2.match(g2.root, fileContents, &pos, &t, t.root.?);
     const end_time = try std.time.Instant.now();
     const elapsed_nanos = end_time.since(start_time);
-    std.debug.print("Elapsed time: {d} s\n", .{elapsed_nanos / 1_000_000});
+    std.debug.print("Elapsed time: {d} ms\n", .{elapsed_nanos / 1_000_000});
 
     // std.debug.print("pos: {d} matches: {d}\n", .{ pos, g2.matchCount });
-    // nodePrint(t.root.?);
     t.deinit();
     //std.debug.print("tree count: {d} node count: {d}\n", .{ t.root.?.count(), g2.nodeCount });
     //std.debug.print("struct size: {d}\n", .{@sizeOf(SpanTree.Node)});
@@ -890,26 +884,12 @@ pub fn main() !void {
 /////////////
 
 // A very minimal output format, primarily for testing
-fn nodePrint(self: *const Node) void {
-    if (self.value.name.len > 0 and self.value.name[0] == '_') {
-        return;
-    }
-    std.debug.print("{s}", .{self.value.name});
-    if (self.children.items.len > 0) {
-        std.debug.print("[", .{});
-        for (self.children.items) |c| {
-            nodePrint(c);
-            std.debug.print(",", .{});
-        }
-        std.debug.print("[", .{});
-    }
-}
-
 fn nodeToString(self: *const Node, output: *std.ArrayList(u8)) !void {
     if (self.value.name.len > 0 and self.value.name[0] == '_') {
         return;
     }
     try output.appendSlice(self.value.name);
+
     if (self.children.items.len > 0) {
         try output.append('[');
         for (self.children.items) |c| {
@@ -919,6 +899,7 @@ fn nodeToString(self: *const Node, output: *std.ArrayList(u8)) !void {
     }
 }
 
+// Utility function for expressionToRhs
 fn usizeToStr(num: usize, output: *std.ArrayList(u8)) !void {
     var i = num;
     if (i == 0) {
@@ -937,12 +918,12 @@ fn expressionToRhs(self: *const Expression, output: *std.ArrayList(u8)) !void {
         .regex => |r| {
             try output.appendSlice("~\"");
             try output.appendSlice(r.value);
-            try output.appendSlice("\"");
+            try output.append('"');
         },
         .literal => |l| {
-            try output.appendSlice("\"");
+            try output.append('"');
             try output.appendSlice(l.value);
-            try output.appendSlice("\"");
+            try output.append('"');
         },
         .reference => |r| {
             try output.appendSlice(r.target);
@@ -993,9 +974,9 @@ fn expressionToRhs(self: *const Expression, output: *std.ArrayList(u8)) !void {
         },
         .lookahead => |l| {
             if (l.negative) {
-                try output.appendSlice("!");
+                try output.append('!');
             } else {
-                try output.appendSlice("&");
+                try output.append('&');
             }
             try expressionToRhs(l.child, output);
         },
@@ -1125,6 +1106,7 @@ test "grammar parsing" {
         o: []const u8, // output
     }{
         .{ .i = "a = a", .o = "rf" },
+        .{ .i = "a  =      a", .o = "rf" },
         .{ .i = "a = a # comment", .o = "rf" },
         .{ .i = "a = \"x\"", .o = "l" },
         .{ .i = "a = ~\"x\"", .o = "rx" },

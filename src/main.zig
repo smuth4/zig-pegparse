@@ -15,7 +15,7 @@ const regex = @cImport({
 const Span = struct {
     start: usize,
     end: usize,
-    name: []const u8,
+    expr: *const Expression,
 };
 
 const SpanTree = ntree.NaryTree(Span);
@@ -244,7 +244,7 @@ const Grammar = struct {
 
     pub fn parseWith(self: *Grammar, data: []const u8, root: *Expression) !?SpanTree {
         var pos: usize = 0;
-        var tree = try SpanTree.init(self.allocator, .{ .name = "root", .start = 0, .end = 0 });
+        var tree = try SpanTree.init(self.allocator, .{ .expr = root, .start = 0, .end = 0 });
         try self.match(root, data, &pos, &tree, tree.root.?);
         if (pos != data.len) {
             //const start = if (pos > 5) pos - 5 else pos;
@@ -322,15 +322,15 @@ const Grammar = struct {
 
         fn visit_generic(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
             // Skip over anything starting with '_'
-            if (node.value.name.len != 0 and node.value.name[0] == '_') {
+            if (node.value.expr.*.name.len != 0 and node.value.expr.*.name[0] == '_') {
                 return null;
             }
-            if (self.visitorTable.get(node.value.name)) |func| {
+            if (self.visitorTable.get(node.value.expr.*.name)) |func| {
                 return func(self, data, node);
             } else {
                 // Return the first non-null result by default
                 for (node.children.items) |child| {
-                    if (node.value.name.len != 0 and node.value.name[0] == '_') {
+                    if (node.value.expr.*.name.len != 0 and node.value.expr.*.name[0] == '_') {
                         return null;
                     }
                     if (try self.visit_generic(data, child)) |result| {
@@ -668,7 +668,7 @@ const Grammar = struct {
                     const old_pos = pos.*;
                     pos.* += result;
                     self.nodeCount += 1;
-                    _ = try tree.nodeAddChild(node, .{ .name = exp.name, .start = old_pos, .end = pos.* });
+                    _ = try tree.nodeAddChild(node, .{ .expr = exp, .start = old_pos, .end = pos.* });
                 }
             },
             .literal => |l| {
@@ -678,7 +678,7 @@ const Grammar = struct {
                     const old_pos = pos.*;
                     pos.* += l.value.len;
                     self.nodeCount += 1;
-                    _ = try tree.nodeAddChild(node, .{ .name = exp.name, .start = old_pos, .end = pos.* });
+                    _ = try tree.nodeAddChild(node, .{ .expr = exp, .start = old_pos, .end = pos.* });
                 }
             },
             .reference => |r| {
@@ -689,7 +689,7 @@ const Grammar = struct {
             },
             .sequence => |s| {
                 //std.debug.print("parse sequence name={s}\n", .{exp.name});
-                var child = try tree.nodeAddChild(node, .{ .name = exp.name, .start = pos.*, .end = pos.* });
+                var child = try tree.nodeAddChild(node, .{ .expr = exp, .start = pos.*, .end = pos.* });
 
                 for (s.children.items, 1..) |c, i| {
                     try self.match(c, data, pos, tree, child);
@@ -705,7 +705,7 @@ const Grammar = struct {
             },
             .choice => |s| {
                 //std.debug.print("parse choice name={s}\n", .{exp.name});
-                var child = try tree.nodeAddChild(node, .{ .name = exp.name, .start = pos.*, .end = pos.* });
+                var child = try tree.nodeAddChild(node, .{ .expr = exp, .start = pos.*, .end = pos.* });
 
                 for (s.children.items) |c| {
                     try self.match(c, data, pos, tree, child);
@@ -723,7 +723,7 @@ const Grammar = struct {
             },
             .lookahead => |l| {
                 //std.debug.print("parse lookahead name={s}\n", .{exp.name});
-                var child = try tree.nodeAddChild(node, .{ .name = exp.name, .start = pos.*, .end = pos.* });
+                var child = try tree.nodeAddChild(node, .{ .expr = exp, .start = pos.*, .end = pos.* });
 
                 try self.match(l.child, data, pos, tree, child);
                 // Always roll back
@@ -742,7 +742,7 @@ const Grammar = struct {
             },
             .quantity => |q| {
                 // std.debug.print("parse quantity name={s}\n", .{exp.name});
-                var child = try tree.nodeAddChild(node, .{ .name = exp.name, .start = pos.*, .end = pos.* });
+                var child = try tree.nodeAddChild(node, .{ .expr = exp, .start = pos.*, .end = pos.* });
                 var i: usize = 0; //Expected count of children
                 while (child.children.items.len < q.max and pos.* < data.len) {
                     i += 1;
@@ -828,9 +828,9 @@ const Grammar = struct {
 };
 
 pub fn main() !void {
-    const callocator = std.heap.c_allocator;
-    var lallocator = LoggingAllocator.init(callocator);
-    const allocator = lallocator.allocator();
+    const allocator = std.heap.c_allocator;
+    // var lallocator = LoggingAllocator.init(callocator);
+    //const allocator = lallocator.allocator();
 
     var g = Grammar.init(allocator);
     defer g.deinit();
@@ -873,7 +873,7 @@ pub fn main() !void {
     var pos: usize = 0;
 
     const start_time = try std.time.Instant.now();
-    var t = try SpanTree.init(allocator, .{ .name = "root", .start = 0, .end = 0 });
+    var t = try SpanTree.init(allocator, .{ .expr = g2.root, .start = 0, .end = 0 });
     try g2.match(g2.root, fileContents, &pos, &t, t.root.?);
     const end_time = try std.time.Instant.now();
     const elapsed_nanos = end_time.since(start_time);

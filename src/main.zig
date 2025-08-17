@@ -22,6 +22,18 @@ const SpanTree = ntree.NaryTree(Span);
 
 const Node = SpanTree.Node;
 
+// Global match data to be re-used for regexes
+var match_data: ?*regex.pcre2_match_data_8 = null;
+
+fn get_match_data() ?*regex.pcre2_match_data_8 {
+    if (match_data) |m| {
+        return m;
+    } else {
+        match_data = regex.pcre2_match_data_create_8(1, null);
+        return match_data;
+    }
+}
+
 /// Compiles a regex pattern string and returns a pattern code you can use
 /// to match subjects. Returns `null` if something is wrong with the pattern
 fn compile(needle: []const u8, options: u32) ?*regex.pcre2_code_8 {
@@ -48,21 +60,18 @@ fn find(regexp: *regex.pcre2_code_8, haystack: []const u8) ?usize {
     const subject: regex.PCRE2_SPTR8 = haystack.ptr;
     const subjLen: regex.PCRE2_SIZE = haystack.len;
 
-    const matchData: ?*regex.pcre2_match_data_8 = regex.pcre2_match_data_create_from_pattern_8(regexp, null);
     // regex.PCRE2_ANCHORED prevents us from using JIT compilation, maybe it can be removed somehow?
-    const rc: c_int = regex.pcre2_match_8(regexp, subject, subjLen, 0, regex.PCRE2_ANCHORED, matchData.?, null);
+    const rc: c_int = regex.pcre2_match_8(regexp, subject, subjLen, 0, regex.PCRE2_ANCHORED, get_match_data(), null);
 
     if (rc < 0) {
-        regex.pcre2_match_data_free_8(matchData);
         return null;
     }
 
     if (rc == 0) {
         std.debug.print("ovector was not big enough for all the captured substrings\n", .{});
-        regex.pcre2_match_data_free_8(matchData);
         return null;
     }
-    const ovector = regex.pcre2_get_ovector_pointer_8(matchData);
+    const ovector = regex.pcre2_get_ovector_pointer_8(get_match_data());
 
     if (ovector[0] > ovector[1]) {
         std.debug.print("error with ovector\n", .{});
@@ -575,7 +584,11 @@ const Grammar = struct {
     }
 
     pub fn bootstrap(self: *Grammar) !*Expression {
-        // Parsimonious bootstraps itself, which is fun, but manually creating the grammar allows us to not have use references
+        // Allow PCRE2 to reserve some memory before anything else
+        _ = get_match_data();
+
+        // Parsimonious bootstraps itself, which is fun, but manually
+        // creating the grammar allows us to not have use references
         const ws = try self.createRegex("ws", "\\s+");
         const comment = try self.createRegex("comment", "#[^\r\n]*");
         const ignore = try self.createZeroOrMore("_ignore", try self.createChoice(
@@ -830,8 +843,6 @@ const Grammar = struct {
 
 pub fn main() !void {
     const allocator = std.heap.c_allocator;
-    // var lallocator = LoggingAllocator.init(callocator);
-    //const allocator = lallocator.allocator();
 
     var g = Grammar.init(allocator);
     defer g.deinit();

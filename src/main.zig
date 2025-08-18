@@ -263,7 +263,11 @@ const Grammar = struct {
         };
         defer visitor.visitorTable.deinit();
         var tree = try self.parse(data);
-        defer tree.?.deinit();
+        defer {
+            if (tree != null) { // Can't use `if () |_|` because it doesn't detect deinit() as a
+                tree.?.deinit();
+            }
+        }
         try visitor.visit(data, tree.?.root.?);
         return grammar;
     }

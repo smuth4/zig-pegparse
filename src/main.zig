@@ -228,7 +228,6 @@ const Grammar = struct {
             },
             .choice => |s| {
                 std.debug.print("choice name={s}\n", .{e.name});
-                //std.debug.print("choice", .{});
                 for (s.children.items) |c| {
                     self.printInner(rs, c, i + 2);
                 }
@@ -300,8 +299,8 @@ const Grammar = struct {
             try self.visitorTable.put("regex", &ExpressionVisitor.visit_regex);
             try self.visitorTable.put("rule", &ExpressionVisitor.visit_rule);
             try self.visitorTable.put("label_regex", &ExpressionVisitor.visit_label_regex);
-            try self.visitorTable.put("single_quoted_literal", &ExpressionVisitor.visit_double_quoted_literal);
-            try self.visitorTable.put("double_quoted_literal", &ExpressionVisitor.visit_single_quoted_literal);
+            try self.visitorTable.put("single_quoted_literal", &ExpressionVisitor.visit_single_quoted_literal);
+            try self.visitorTable.put("double_quoted_literal", &ExpressionVisitor.visit_double_quoted_literal);
             try self.visitorTable.put("sequence", &ExpressionVisitor.visit_sequence);
             try self.visitorTable.put("ored", &ExpressionVisitor.visit_ored);
             try self.visitorTable.put("or_term", &ExpressionVisitor.visit_or_term);
@@ -426,11 +425,10 @@ const Grammar = struct {
             return self.grammar.initExpression(label, expression.?.*.matcher);
         }
 
-        // TODO handle escape sequences
         fn visit_double_quoted_literal(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
             // Send back an empty-value literal with the data as the name
             var unescaped_literal = std.ArrayList(u8).init(self.grammar.*.expressionArena.allocator());
-            _ = try std.zig.string_literal.parseWrite(unescaped_literal.writer(), data[(node.value.start + 1)..(node.value.end - 1)]);
+            _ = try std.zig.string_literal.parseWrite(unescaped_literal.writer(), data[node.value.start..node.value.end]);
             return try self.grammar.createLiteral("", try unescaped_literal.toOwnedSlice());
         }
 
@@ -906,10 +904,10 @@ pub fn main() !void {
 
 // A very minimal output format, primarily for testing
 fn nodeToString(self: *const Node, output: *std.ArrayList(u8)) !void {
-    if (self.value.name.len > 0 and self.value.name[0] == '_') {
+    if (self.value.expr.*.name.len > 0 and self.value.expr.*.name[0] == '_') {
         return;
     }
-    try output.appendSlice(self.value.name);
+    try output.appendSlice(self.value.expr.*.name);
 
     if (self.children.items.len > 0) {
         try output.append('[');
@@ -1062,7 +1060,6 @@ test "expressions" {
     }{
         .{ .e = try grammar.createLiteral("", "="), .i = "=", .o = "" },
         .{ .e = try grammar.createLiteral("", "test"), .i = "test", .o = "" },
-        .{ .e = try grammar.createLiteral("", "\\n"), .i = "\n", .o = "" },
         .{ .e = try grammar.createRegex("", "test"), .i = "test", .o = "" },
         .{ .e = try grammar.createRegex("", "\\s+"), .i = "     ", .o = "" },
         .{ .e = try grammar.createRegex("", "\\s*"), .i = "", .o = "" },
@@ -1094,7 +1091,7 @@ test "expressions" {
     }
 }
 
-test "expression parse fails" {
+test "expression parse does not match" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
     var grammar = Grammar.init(allocator);
@@ -1123,6 +1120,27 @@ test "expression parse fails" {
     }
 }
 
+fn testExpectGrammarMatch(i: []const u8, o: []const u8) !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+    var grammar = Grammar.init(allocator);
+    _ = try grammar.bootstrap();
+
+    var exprStr = std.ArrayList(u8).init(allocator);
+    defer exprStr.deinit();
+    const tree = try grammar.parse(i);
+    try std.testing.expectEqual(i.len, tree.?.root.?.children.items[0].value.end);
+    const new_grammar = try grammar.createGrammar(i);
+    try expressionToString(new_grammar.root, &exprStr);
+    try std.testing.expectEqualStrings(o, exprStr.items);
+
+    try exprStr.resize(0);
+}
+
+test "grammar - reference" {
+    try testExpectGrammarMatch("a = a", "rf");
+}
+
 test "grammar parsing" {
     const cases = &[_]struct {
         i: []const u8, // input
@@ -1137,6 +1155,7 @@ test "grammar parsing" {
         .{ .i = "a = ~\"x\"i", .o = "rx" },
         .{ .i = "a = ~\"x\"is", .o = "rx" },
         .{ .i = "a = ~\"x\"i", .o = "rx" },
+        .{ .i = "a = \"a\"", .o = "l" },
         .{ .i = "a = 'a'", .o = "l" },
         .{ .i = "a = !b", .o = "n[rf]" },
         .{ .i = "a = b*", .o = "q[rf]" },

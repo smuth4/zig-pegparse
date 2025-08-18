@@ -169,6 +169,20 @@ const Grammar = struct {
         };
     }
 
+    pub fn createFactory(allocator: Allocator) Grammar {
+        var g = Grammar{
+            // This needs to be filled for parse() to actually do
+            // anything, we'll set it with a manually constructed
+            // expression for a first bootstrap
+            .root = undefined,
+            .allocator = allocator,
+            .expressionArena = std.heap.ArenaAllocator.init(allocator),
+            .references = ReferenceTable.init(allocator),
+        };
+        g.bootstrap();
+        return g;
+    }
+
     pub fn deinit(self: *Grammar) void {
         self.references.clearAndFree();
         self.expressionArena.deinit();

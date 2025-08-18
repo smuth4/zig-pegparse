@@ -429,7 +429,9 @@ const Grammar = struct {
         // TODO handle escape sequences
         fn visit_double_quoted_literal(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
             // Send back an empty-value literal with the data as the name
-            return try self.grammar.createLiteral("", data[(node.value.start + 1)..(node.value.end - 1)]);
+            var unescaped_literal = std.ArrayList(u8).init(self.grammar.*.expressionArena.allocator());
+            _ = try std.zig.string_literal.parseWrite(unescaped_literal.writer(), data[(node.value.start + 1)..(node.value.end - 1)]);
+            return try self.grammar.createLiteral("", try unescaped_literal.toOwnedSlice());
         }
 
         // TODO handle escape sequences
@@ -488,7 +490,8 @@ const Grammar = struct {
         fn visit_regex(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
             var options: u32 = 0;
             const optionsNode = node.children.items[2];
-            const quoted_re = try self.visit_generic(data, node.children.items[1]);
+            const re_string = node.children.items[1].children.items[0];
+            const quoted_re = data[re_string.value.start + 1 .. re_string.value.end - 1];
             for (data[optionsNode.value.start..optionsNode.value.end]) |c| {
                 options = options | switch (c) {
                     'i' => regex.PCRE2_CASELESS,
@@ -501,7 +504,7 @@ const Grammar = struct {
             }
             const re = try self.grammar.createRegexOptions(
                 "",
-                getLiteralValue(quoted_re.?),
+                quoted_re,
                 options,
             );
             return re;
@@ -1059,6 +1062,7 @@ test "expressions" {
     }{
         .{ .e = try grammar.createLiteral("", "="), .i = "=", .o = "" },
         .{ .e = try grammar.createLiteral("", "test"), .i = "test", .o = "" },
+        .{ .e = try grammar.createLiteral("", "\\n"), .i = "\n", .o = "" },
         .{ .e = try grammar.createRegex("", "test"), .i = "test", .o = "" },
         .{ .e = try grammar.createRegex("", "\\s+"), .i = "     ", .o = "" },
         .{ .e = try grammar.createRegex("", "\\s*"), .i = "", .o = "" },
@@ -1105,6 +1109,7 @@ test "expression parse fails" {
         .{ .e = a, .i = "!" },
         .{ .e = try grammar.createLiteral("", "test"), .i = "test2" },
         .{ .e = try grammar.createLiteral("", "test"), .i = "tes" },
+        .{ .e = try grammar.createLiteral("", "\\n"), .i = "\t" },
         .{ .e = try grammar.createRegex("", "test"), .i = "tes" },
         .{ .e = try grammar.createRegex("", "\\s+"), .i = "test" },
         .{ .e = try grammar.createZeroOrOne("", a), .i = "aaa" },

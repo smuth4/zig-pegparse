@@ -271,9 +271,9 @@ const Grammar = struct {
         var grammar = Grammar.init(self.allocator);
         var visitor = Grammar.ExpressionVisitor{
             .grammar = &grammar,
-            .allocator = self.allocator,
-            .visitorTable = std.StringHashMap(Grammar.ExpressionVisitor.ExpressionVisitorSignature).init(self.allocator),
-            .referenceStack = std.ArrayList([]const u8).init(self.allocator),
+            .allocator = grammar.allocator,
+            .visitorTable = std.StringHashMap(Grammar.ExpressionVisitor.ExpressionVisitorSignature).init(grammar.allocator),
+            .referenceStack = std.ArrayList([]const u8).init(grammar.allocator),
         };
         defer visitor.visitorTable.deinit();
         var tree = try self.parse(data);

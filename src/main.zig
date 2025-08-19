@@ -24,23 +24,29 @@ const Node = SpanTree.Node;
 
 // Data structures for supported expressions
 const ExpressionList = std.ArrayList(*Expression);
+
+// Represents a literal string
 const Literal = struct {
     value: []const u8,
 };
 
+// Represents a reference to a different rule
 const Reference = struct {
     target: []const u8,
 };
 
+// PCRE2 regex (with original string stored for error reporting)
 const Regex = struct {
     value: []const u8,
     re: *regex.pcre2_code_8,
 };
 
+// Handles ` `-separated sequences
 const Sequence = struct {
     children: ExpressionList,
 };
 
+// Handles `/`-separated choices
 const Choice = struct {
     children: ExpressionList,
 };
@@ -91,6 +97,12 @@ const ParseErrorDiagnostic = struct {
     message: []const u8 = "",
 };
 
+const ParseCache = std.AutoHashMap(ParseCacheKey, SpanTree);
+const ParseCacheKey = struct {
+    position: usize,
+    expr: *const Expression,
+};
+
 const Grammar = struct {
     // The main allocator, will also be used for expressionArena and the
     // generated node tree by default.
@@ -107,6 +119,7 @@ const Grammar = struct {
     diagnostic: ?ParseErrorDiagnostic = null,
     // Global match data to be re-used for regexes
     matchData: ?*regex.pcre2_match_data_8 = null,
+    parseCache: ParseCache,
 
     pub fn init(allocator: Allocator) Grammar {
         return Grammar{
@@ -118,6 +131,7 @@ const Grammar = struct {
             .expressionArena = std.heap.ArenaAllocator.init(allocator),
             .references = ReferenceTable.init(allocator),
             .matchData = regex.pcre2_match_data_create_8(1, null),
+            .parseCache = ParseCache.init(allocator), // Initialize AutoHashMap
         };
     }
 
@@ -679,14 +693,31 @@ const Grammar = struct {
     // Start matching `data` with `exp` starting from `pos`, adding children under `node` in `tree`
     pub fn match(self: *Grammar, exp: *const Expression, data: []const u8, pos: *usize, tree: *SpanTree, node: *SpanTree.Node) !void {
         const toParse = data[pos.*..];
+
+        // Handle the packrat caching
+        const cacheKey = ParseCacheKey{
+            .position = pos.*,
+            .expr = exp,
+        };
+
+        // Check if we have a cached result
+        if (self.parseCache.get(cacheKey)) |entry| {
+            // If cache entry is found, we can directly return
+            //std.debug.print("cache hit pos:{d} exp:{s} end:{d}\n", .{ pos.*, exp.name, entry.root.?.value.end });
+            _ = try tree.nodeAddChild(node, entry.root.?.value);
+            pos.* = entry.root.?.value.end;
+            return; // Exit early, using cached result
+        }
+
         switch (exp.*.matcher) {
             .regex => |r| {
                 //std.debug.print("parse regex name={s} value={s}\n", .{ exp.name, r.value });
                 if (self.find(r.re, toParse)) |result| {
-                    //std.debug.print("parse regex match: {s}\n", .{toParse[0..result]});
+                    //std.debug.print("parse regex pos:{d} match: {s} end:{d}\n", .{ pos.*, toParse[0..result], pos.* + result });
                     const old_pos = pos.*;
                     pos.* += result;
                     _ = try tree.nodeAddChild(node, .{ .expr = exp, .start = old_pos, .end = pos.* });
+                    try self.parseCache.put(cacheKey, try SpanTree.init(self.allocator, .{ .expr = exp, .start = old_pos, .end = pos.* }));
                 }
             },
             .literal => |l| {
@@ -1183,6 +1214,7 @@ test "grammar parsing" {
     var exprStr = std.ArrayList(u8).init(allocator);
     defer exprStr.deinit();
     for (cases) |case| {
+        grammar.parseCache.clearAndFree();
         const tree = try grammar.parse(case.i);
         try std.testing.expectEqual(case.i.len, tree.?.root.?.children.items[0].value.end);
         const new_grammar = try grammar.createGrammar(case.i);

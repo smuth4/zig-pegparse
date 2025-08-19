@@ -34,52 +34,6 @@ fn get_match_data() ?*regex.pcre2_match_data_8 {
     }
 }
 
-/// Compiles a regex pattern string and returns a pattern code you can use
-/// to match subjects. Returns `null` if something is wrong with the pattern
-fn compile(needle: []const u8, options: u32) ?*regex.pcre2_code_8 {
-    const pattern: regex.PCRE2_SPTR8 = needle.ptr;
-    const patternLen: regex.PCRE2_SIZE = needle.len;
-    var errornumber: c_int = undefined;
-    var erroroffset: regex.PCRE2_SIZE = undefined;
-
-    const regexp: ?*regex.pcre2_code_8 = regex.pcre2_compile_8(pattern, patternLen, options, &errornumber, &erroroffset, null);
-    if (regexp == null) {
-        std.debug.print("re err: {d}\n", .{errornumber});
-        var errbuf: [512]u8 = undefined;
-        const buf: *regex.PCRE2_UCHAR8 = &errbuf[0];
-        const writtenSize = regex.pcre2_get_error_message_8(errornumber, buf, 512);
-        std.debug.print("re errmsg: {s}\n", .{errbuf[0..@intCast(writtenSize)]});
-    }
-    return regexp;
-}
-
-/// Takes in a compiled regexp pattern from `compile` and a string of
-/// test which is the haystack and returns either the length of the
-/// left-anchored match if found, or null if no match was found.
-fn find(regexp: *regex.pcre2_code_8, haystack: []const u8) ?usize {
-    const subject: regex.PCRE2_SPTR8 = haystack.ptr;
-    const subjLen: regex.PCRE2_SIZE = haystack.len;
-
-    // regex.PCRE2_ANCHORED prevents us from using JIT compilation, maybe it can be removed somehow?
-    const rc: c_int = regex.pcre2_match_8(regexp, subject, subjLen, 0, regex.PCRE2_ANCHORED, get_match_data(), null);
-
-    if (rc < 0) {
-        return null;
-    }
-
-    if (rc == 0) {
-        std.debug.print("ovector was not big enough for all the captured substrings\n", .{});
-        return null;
-    }
-    const ovector = regex.pcre2_get_ovector_pointer_8(get_match_data());
-
-    if (ovector[0] > ovector[1]) {
-        std.debug.print("error with ovector\n", .{});
-        return null;
-    }
-    return ovector[1] - ovector[0];
-}
-
 // Data structures for supported expressions
 const ExpressionList = std.ArrayList(*Expression);
 const Literal = struct {
@@ -116,7 +70,7 @@ const Lookahead = struct {
     child: *Expression,
 };
 
-const GrammarError = error{ InvalidRegex, DuplicateLabel };
+const GrammarParseError = error{ ParseError, DuplicateLabel, InvalidRegex };
 
 // Utility function, make better later
 fn indent(level: u32) void {
@@ -143,6 +97,12 @@ const Expression = struct {
 const ReferenceTable = std.StringHashMap(*Expression);
 const ReferenceList = std.ArrayList(*Expression);
 
+const ParseErrorDiagnostic = struct {
+    pos: usize = 0,
+    node: ?*Node = null,
+    message: []const u8 = "",
+};
+
 const Grammar = struct {
     // The main allocator, will also be used for expressionArena and the
     // generated node tree by default.
@@ -156,6 +116,7 @@ const Grammar = struct {
     expressionArena: std.heap.ArenaAllocator,
     ignorePrefix: u8 = '_',
     // Some debugging stats
+    diagnostic: ?ParseErrorDiagnostic = null,
 
     pub fn init(allocator: Allocator) Grammar {
         return Grammar{
@@ -167,6 +128,57 @@ const Grammar = struct {
             .expressionArena = std.heap.ArenaAllocator.init(allocator),
             .references = ReferenceTable.init(allocator),
         };
+    }
+
+    /// Compiles a regex pattern string and returns a pattern code you can use
+    /// to match subjects. Returns `null` if something is wrong with the pattern
+    fn compile(self: *const Grammar, needle: []const u8, options: u32) ?*regex.pcre2_code_8 {
+        const pattern: regex.PCRE2_SPTR8 = needle.ptr;
+        const patternLen: regex.PCRE2_SIZE = needle.len;
+        var errornumber: c_int = undefined;
+        var erroroffset: regex.PCRE2_SIZE = undefined;
+
+        const regexp: ?*regex.pcre2_code_8 = regex.pcre2_compile_8(pattern, patternLen, options, &errornumber, &erroroffset, null);
+        if (regexp == null) {
+            if (self.diagnostic) |_| {
+                std.debug.print("re err: {d}\n", .{errornumber});
+            }
+            var errbuf: [512]u8 = undefined;
+            const buf: *regex.PCRE2_UCHAR8 = &errbuf[0];
+            const writtenSize = regex.pcre2_get_error_message_8(errornumber, buf, 512);
+            if (self.diagnostic) |_| {
+                std.debug.print("re err: {d}\n", .{errornumber});
+            }
+            std.debug.print("re errmsg: {s}\n", .{errbuf[0..@intCast(writtenSize)]});
+        }
+        return regexp;
+    }
+
+    /// Takes in a compiled regexp pattern from `compile` and a string of
+    /// test which is the haystack and returns either the length of the
+    /// left-anchored match if found, or null if no match was found.
+    fn find(_: *const Grammar, regexp: *regex.pcre2_code_8, haystack: []const u8) ?usize {
+        const subject: regex.PCRE2_SPTR8 = haystack.ptr;
+        const subjLen: regex.PCRE2_SIZE = haystack.len;
+
+        // regex.PCRE2_ANCHORED prevents us from using JIT compilation, maybe it can be removed somehow?
+        const rc: c_int = regex.pcre2_match_8(regexp, subject, subjLen, 0, regex.PCRE2_ANCHORED, get_match_data(), null);
+
+        if (rc < 0) {
+            return null;
+        }
+
+        if (rc == 0) {
+            std.debug.print("ovector was not big enough for all the captured substrings\n", .{});
+            return null;
+        }
+        const ovector = regex.pcre2_get_ovector_pointer_8(get_match_data());
+
+        if (ovector[0] > ovector[1]) {
+            std.debug.print("error with ovector\n", .{});
+            return null;
+        }
+        return ovector[1] - ovector[0];
     }
 
     pub fn createFactory(allocator: Allocator) Grammar {
@@ -277,7 +289,7 @@ const Grammar = struct {
         defer visitor.visitorTable.deinit();
         var tree = try self.parse(data);
         defer {
-            if (tree != null) { // Can't use `if () |_|` because it doesn't detect deinit() as a
+            if (tree != null) { // Can't use `if () |_|` because it doesn't detect deinit() as a modification to `var tree`
                 tree.?.deinit();
             }
         }
@@ -520,7 +532,7 @@ const Grammar = struct {
             const result = try self.references.getOrPut(name);
             if (result.found_existing) {
                 //std.debug.print("dupe: {s}\n", .{name});
-                return GrammarError.DuplicateLabel;
+                return GrammarParseError.DuplicateLabel;
             } else {
                 //std.debug.print("insert reference: {s}\n", .{name});
                 result.value_ptr.* = expr;
@@ -577,7 +589,7 @@ const Grammar = struct {
     }
 
     fn createRegexOptions(self: *Grammar, name: []const u8, value: []const u8, options: u32) !*Expression {
-        const re = compile(value, options) orelse return GrammarError.InvalidRegex;
+        const re = self.compile(value, options) orelse return GrammarParseError.InvalidRegex;
         return self.initExpression(name, .{ .regex = Regex{ .value = value, .re = re } });
     }
 
@@ -682,7 +694,7 @@ const Grammar = struct {
         switch (exp.*.matcher) {
             .regex => |r| {
                 //std.debug.print("parse regex name={s} value={s}\n", .{ exp.name, r.value });
-                if (find(r.re, toParse)) |result| {
+                if (self.find(r.re, toParse)) |result| {
                     //std.debug.print("parse regex match: {s}\n", .{toParse[0..result]});
                     const old_pos = pos.*;
                     pos.* += result;
@@ -1190,5 +1202,25 @@ test "grammar parsing" {
         try std.testing.expectEqualStrings(case.o, exprStr.items);
 
         try exprStr.resize(0);
+    }
+}
+
+test "grammar fails" {
+    const cases = &[_]struct {
+        i: []const u8, // input
+    }{
+        .{ .i = "a = ~\"[A-Z\"" },
+    };
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+    var grammar = Grammar.init(allocator);
+    _ = try grammar.bootstrap();
+
+    for (cases) |case| {
+        const tree = try grammar.parse(case.i);
+        try std.testing.expectEqual(case.i.len, tree.?.root.?.children.items[0].value.end);
+        const result = grammar.createGrammar(case.i);
+        try std.testing.expectError(GrammarParseError.InvalidRegex, result);
     }
 }

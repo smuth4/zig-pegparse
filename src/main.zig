@@ -460,6 +460,8 @@ const Grammar = struct {
             const ref_text = try self.visit_generic(data, node.children.items[0]);
             if (data[node.value.start] == '!') {
                 return try self.grammar.createNot("", try self.grammar.createReference("", getLiteralValue(ref_text.?)));
+            } else if (data[node.value.start] == '&') {
+                return try self.grammar.createLookahead("", try self.grammar.createReference("", getLiteralValue(ref_text.?)));
             } else {
                 return try self.grammar.createReference("", getLiteralValue(ref_text.?));
             }
@@ -497,6 +499,8 @@ const Grammar = struct {
             // Send back an empty-value literal with the label as the name
             if (data[node.value.start] == '!') {
                 return try self.grammar.createNot("", try self.grammar.createLiteral("", data[node.value.start + 1 .. node.value.end]));
+            } else if (data[node.value.start] == '&') {
+                return try self.grammar.createLookahead("", try self.grammar.createLiteral("", data[node.value.start + 1 .. node.value.end]));
             } else {
                 return try self.grammar.createLiteral("", data[node.value.start..node.value.end]);
             }
@@ -619,7 +623,7 @@ const Grammar = struct {
         const label = try self.createSequence(
             "label",
             &[_]*Expression{
-                try self.createRegex("label_regex", "!?[a-zA-Z_][a-zA-Z_0-9]*"),
+                try self.createRegex("label_regex", "[!&]?[a-zA-Z_][a-zA-Z_0-9]*"),
                 ignore,
             },
         );
@@ -1168,8 +1172,21 @@ fn testExpectGrammarMatch(i: []const u8, o: []const u8) !void {
     try exprStr.resize(0);
 }
 
-test "grammar - reference" {
+test "grammar - basics" {
     try testExpectGrammarMatch("a = a", "rf");
+    try testExpectGrammarMatch("a = \"x\"", "l");
+    try testExpectGrammarMatch("a = 'x'", "l");
+    try testExpectGrammarMatch("a = ~\"x\"", "rx");
+}
+
+test "grammar - lookahead" {
+    try testExpectGrammarMatch("a = !b", "n[rf]");
+    try testExpectGrammarMatch("a = &b", "la[rf]");
+}
+
+test "grammar - ignore comments & whitespace" {
+    try testExpectGrammarMatch("  a    =  \n   a  ", "rf");
+    try testExpectGrammarMatch("a = a # comment", "rf");
 }
 
 test "grammar parsing" {
@@ -1177,8 +1194,6 @@ test "grammar parsing" {
         i: []const u8, // input
         o: []const u8, // output
     }{
-        .{ .i = "a = a", .o = "rf" },
-        .{ .i = "a  =      a", .o = "rf" },
         .{ .i = "a = a # comment", .o = "rf" },
         .{ .i = "a = \"x\"", .o = "l" },
         .{ .i = "a = ~\"x\"", .o = "rx" },

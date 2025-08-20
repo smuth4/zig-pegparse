@@ -21,22 +21,29 @@ zig fetch https://github.com/smuth4/zig-pegparse/archive/<commit>.tar.gz --save-
 const pegparse = @import("zig_pegparse");
 
 pub fn main() !void {
+    // Feel free to use whatever allocator you want
     const allocator = std.heap.c_allocator;
 
+    // The factory here is a just a specialized grammar that can create more grammars
     grammar_factory = pegparse.Grammar.createFactory(allocator);
     defer grammar_factory.deinit();
-    
+
+    // Read in the PEG definition
     var grammar = grammar_factory.createGrammar(
         \\bold_text  = bold_open text bold_close
         \\text       = ~"[A-Z 0-9]*"i
         \\bold_open  = "(("
         \\bold_close = "))"
     );
-    
+    defer grammar.deinit();
+
+    // Parse an example string
     const data = "((bold stuff))";
     // Note that parsing the data does not create a copy of it.
     // If the data dissappears, the nodes are still technically traverseable, but reference data in invalid memory.
     var tree = grammar.parse(data);
+    defer tree.deinit();
+
     grammar.print(tree, data);
 }
 ```
@@ -46,22 +53,18 @@ pub fn main() !void {
 | Example            | Notes                                                                                                                                                |
 |--------------------|------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `"string literal"` | A simple string literal, with support for escape sequences such as `\n`.                                                                             |
-| `'string literal'` | Another form of string literals. Unlike double quotes, the only supported escape sequences are `\'` and `\\`                                         |
+| `'string literal'` | Another form of string literals. Unlike double quoted literals, the only supported escape sequences are `\'` and `\\`                                |
 | `a`                | An example of a reference to another rule. Recursivity in references in support by PEG grammars, but must be carefully used to avoid infinite loops. |
 | `a b c`            | A sequence, where all the items must match in that order.                                                                                            |
 | `a / b / c`        | A choice, where only of one the items will be matched. Items will be tested in order until one succeeds or all of the fail                           |
-| `~"\s+"i`          | Regex, which an optional flag at the end (`i` for case-insensitivity in this case)                                                                   |
+| `~"\s+"i`          | Regex, with an optional flag at the end (`i` for case-insensitivity in this case). Escape sequences are passed directly to PCRE2.                    |
 | `(` `)`            | Used to group expression to ensure a certain priority, has no effect on actual parsing                                                               |
 
-
-## Features
-
-* Supported expr
 
 ## Goals
 
 * Increase error handling facilities
-  * Add optional diagnostic handler
+  * Add optional diagnostic handler for parse errors
 * Reduce memory usage
   * Allow ignoring nodes with a specific prefix
   * Add cut operator
@@ -69,7 +72,6 @@ pub fn main() !void {
   * Add packrat cache - currently a little difficult since we clear
     subexpressions for failed matches from the tree entirely, maybe
     keep them all then clone at the end?
-
 
 ## Limitations
 
@@ -80,7 +82,7 @@ pub fn main() !void {
 
 Bryan Ford's site is an incredible resource for anyone looking at PEG/packrat parsing: https://bford.info/packrat
 
-- Foundational paper: https://bford.info/pub/lang/peg.pdf 
+- Foundational paper: https://bford.info/pub/lang/peg.pdf
   - Paper on reducing memory usage with auto-inserted cut operators: https://kmizu.github.io/papers/paste513-mizushima.pdf
 - Interesting PEG implementations:
   - https://github.com/erikrose/parsimonious - Python, clean API and error reporting

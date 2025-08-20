@@ -43,8 +43,7 @@ pub fn main() !void {
 
 ### Grammar Refrence
 
-
-
+| Example            | Notes                                                                                                                                                |
 |--------------------|------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `"string literal"` | A simple string literal, with support for escape sequences such as `\n`.                                                                             |
 | `'string literal'` | Another form of string literals. Unlike double quotes, the only supported escape sequences are `\'` and `\\`                                         |

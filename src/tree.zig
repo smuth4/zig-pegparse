@@ -193,7 +193,7 @@ pub fn NaryTreeUnmanaged(comptime T: type) type {
 
 test "NaryTree creation and root value" {
     const allocator = std.heap.page_allocator;
-    var tree: NaryTree(u32) = try NaryTree(u32).init(allocator, 1); // Initialize tree with root value 1
+    var tree: NaryTree(u32) = try NaryTree(u32).init(allocator, 1);
 
     const root = tree.root();
     try std.testing.expectEqual(root.?.value, 1);
@@ -204,10 +204,10 @@ test "Add child node" {
     var tree: NaryTree(u32) = try NaryTree(u32).init(allocator, 1);
 
     const root = tree.root();
-    const child = try tree.nodeAddChild(root.?, 2); // Add a child with value 2
+    const child = try tree.nodeAddChild(root.?, 2);
 
     try std.testing.expectEqual(child.*.value, 2);
-    try std.testing.expectEqual(root.?.children.items.len, 1); // Check if child count is 1
+    try std.testing.expectEqual(root.?.children.items.len, 1);
 }
 
 test "Add multiple child nodes" {
@@ -219,15 +219,15 @@ test "Add multiple child nodes" {
     _ = try tree.nodeAddChild(root.?, 3);
     _ = try tree.nodeAddChild(root.?, 4);
 
-    try std.testing.expectEqual(root.?.children.items.len, 3); // Check if child count is 3
+    try std.testing.expectEqual(root.?.children.items.len, 3);
 }
 
 test "Deinitialization frees memory" {
-    const allocator = std.heap.page_allocator;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
     var tree: NaryTree(u32) = try NaryTree(u32).init(allocator, 1);
     const root = tree.root();
     _ = try tree.nodeAddChild(root.?, 2);
 
-    tree.deinit(); // Deinitialize the tree
-    // The test should not crash, and additional checks may be added based on memory tracking.
+    tree.deinit();
 }

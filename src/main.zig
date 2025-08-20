@@ -19,6 +19,7 @@ const Span = struct {
 };
 
 const SpanTree = ntree.NaryTree(Span);
+const SpanTreeUnmanaged = ntree.NaryTreeUnmanaged(Span);
 
 const Node = SpanTree.Node;
 
@@ -97,7 +98,7 @@ const ParseErrorDiagnostic = struct {
     message: []const u8 = "",
 };
 
-const ParseCache = std.AutoHashMap(ParseCacheKey, SpanTree);
+const ParseCache = std.AutoHashMap(ParseCacheKey, SpanTreeUnmanaged);
 const ParseCacheKey = struct {
     position: usize,
     expr: *const Expression,
@@ -708,8 +709,8 @@ const Grammar = struct {
         if (self.parseCache.get(cacheKey)) |entry| {
             // If cache entry is found, we can directly return
             //std.debug.print("cache hit pos:{d} exp:{s} end:{d}\n", .{ pos.*, exp.name, entry.root.?.value.end });
-            _ = try tree.nodeAddChild(node, entry.root().?.value);
-            pos.* = entry.root().?.value.end;
+            _ = try tree.nodeAddChild(node, entry.root.?.value);
+            pos.* = entry.root.?.value.end;
             return; // Exit early, using cached result
         }
 
@@ -721,7 +722,7 @@ const Grammar = struct {
                     const old_pos = pos.*;
                     pos.* += result;
                     _ = try tree.nodeAddChild(node, .{ .expr = exp, .start = old_pos, .end = pos.* });
-                    try self.parseCache.put(cacheKey, try SpanTree.init(self.allocator, .{ .expr = exp, .start = old_pos, .end = pos.* }));
+                    try self.parseCache.put(cacheKey, try SpanTreeUnmanaged.init(&tree.nodePool, .{ .expr = exp, .start = old_pos, .end = pos.* }));
                 }
             },
             .literal => |l| {

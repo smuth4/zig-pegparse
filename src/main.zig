@@ -272,7 +272,7 @@ const Grammar = struct {
     pub fn parseWith(self: *Grammar, data: []const u8, root: *Expression) !?SpanTree {
         var pos: usize = 0;
         var tree = try SpanTree.init(self.allocator, .{ .expr = root, .start = 0, .end = 0 });
-        try self.match(root, data, &pos, &tree, tree.root.?);
+        try self.match(root, data, &pos, &tree, tree.root().?);
         if (pos != data.len) {
             //const start = if (pos > 5) pos - 5 else pos;
             //const end = if (pos < data.len - 6) pos + 5 else data.len - 1;
@@ -298,7 +298,7 @@ const Grammar = struct {
                 tree.?.deinit();
             }
         }
-        try visitor.visit(data, tree.?.root.?);
+        try visitor.visit(data, tree.?.root().?);
         return grammar;
     }
 
@@ -704,8 +704,8 @@ const Grammar = struct {
         if (self.parseCache.get(cacheKey)) |entry| {
             // If cache entry is found, we can directly return
             //std.debug.print("cache hit pos:{d} exp:{s} end:{d}\n", .{ pos.*, exp.name, entry.root.?.value.end });
-            _ = try tree.nodeAddChild(node, entry.root.?.value);
-            pos.* = entry.root.?.value.end;
+            _ = try tree.nodeAddChild(node, entry.root().?.value);
+            pos.* = entry.root().?.value.end;
             return; // Exit early, using cached result
         }
 
@@ -918,7 +918,7 @@ pub fn main() !void {
 
     const start_time = try std.time.Instant.now();
     var t = try SpanTree.init(allocator, .{ .expr = g2.root, .start = 0, .end = 0 });
-    try g2.match(g2.root, fileContents, &pos, &t, t.root.?);
+    try g2.match(g2.root, fileContents, &pos, &t, t.root().?);
     const end_time = try std.time.Instant.now();
     const elapsed_nanos = end_time.since(start_time);
     std.debug.print("Elapsed time: {d} ms\n", .{elapsed_nanos / 1_000_000});
@@ -1115,7 +1115,7 @@ test "expressions" {
 
     for (cases) |case| {
         const tree = try grammar.parseWith(case.i, case.e);
-        try nodeToString(tree.?.root.?.children.items[0], &nodeStr);
+        try nodeToString(tree.?.root().?.children.items[0], &nodeStr);
         try std.testing.expectEqualStrings(case.o, nodeStr.items);
 
         try nodeStr.resize(0);
@@ -1160,7 +1160,7 @@ fn testExpectGrammarMatch(i: []const u8, o: []const u8) !void {
     var exprStr = std.ArrayList(u8).init(allocator);
     defer exprStr.deinit();
     const tree = try grammar.parse(i);
-    try std.testing.expectEqual(i.len, tree.?.root.?.children.items[0].value.end);
+    try std.testing.expectEqual(i.len, tree.?.root().?.children.items[0].value.end);
     const new_grammar = try grammar.createGrammar(i);
     try expressionToString(new_grammar.root, &exprStr);
     try std.testing.expectEqualStrings(o, exprStr.items);
@@ -1216,7 +1216,7 @@ test "grammar parsing" {
     for (cases) |case| {
         grammar.parseCache.clearAndFree();
         const tree = try grammar.parse(case.i);
-        try std.testing.expectEqual(case.i.len, tree.?.root.?.children.items[0].value.end);
+        try std.testing.expectEqual(case.i.len, tree.?.root().?.children.items[0].value.end);
         const new_grammar = try grammar.createGrammar(case.i);
         try expressionToString(new_grammar.root, &exprStr);
         try std.testing.expectEqualStrings(case.o, exprStr.items);
@@ -1239,7 +1239,7 @@ test "grammar fails" {
 
     for (cases) |case| {
         const tree = try grammar.parse(case.i);
-        try std.testing.expectEqual(case.i.len, tree.?.root.?.children.items[0].value.end);
+        try std.testing.expectEqual(case.i.len, tree.?.root().?.children.items[0].value.end);
         const result = grammar.createGrammar(case.i);
         try std.testing.expectError(GrammarParseError.InvalidRegex, result);
     }

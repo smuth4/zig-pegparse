@@ -50,6 +50,11 @@ pub fn NaryTree(comptime T: type) type {
             return new;
         }
 
+        pub fn nodeAddChildNode(self: *@This(), n: *Node, c: *Node) !*Node {
+            try n.children.append(self.allocator, c);
+            return c;
+        }
+
         // Note that this does not handle updating the parent to
         // remove the now-invalid pointer
         pub fn nodeDeinit(self: *@This(), n: *Node) void {
@@ -105,6 +110,10 @@ pub fn NaryTreeUnmanaged(comptime T: type) type {
             return new;
         }
 
+        pub fn nodeSetChild(_: *@This(), alloc: std.mem.Allocator, n: *Node, child: *Node) !void {
+            try n.children.append(alloc, child);
+        }
+
         // Note that this does not handle updating the parent to
         // remove the now-invalid pointer
         pub fn nodeDeinit(self: *@This(), n: *Node) void {
@@ -117,6 +126,13 @@ pub fn NaryTreeUnmanaged(comptime T: type) type {
                 .root = null,
             };
             tree.root = try tree.nodeInit(pool, root_value);
+            return tree;
+        }
+
+        pub fn initRoot(n: *Node) !@This() {
+            const tree: @This() = .{
+                .root = n,
+            };
             return tree;
         }
 

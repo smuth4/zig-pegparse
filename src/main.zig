@@ -646,7 +646,6 @@ const Grammar = struct {
             try self.createChoice("quoted_regexp", &[_]*Expression{ double_quoted_literal, single_quoted_literal }),
             try self.createRegex("", "[imsua]*"),
             ignore,
-            //ignore,
         });
         const parenthesized = try self.createSequence("parenthesized", &[_]*Expression{
             try self.createLiteral("", "("),
@@ -708,10 +707,12 @@ const Grammar = struct {
         // Check if we have a cached result
         if (self.parseCache.get(cacheKey)) |entry| {
             // If cache entry is found, we can directly return
-            //std.debug.print("cache hit pos:{d} exp:{s} end:{d}\n", .{ pos.*, exp.name, entry.root.?.value.end });
-            _ = try tree.nodeAddChild(node, entry.root.?.value);
+            //std.debug.print("cache hit pos:{d} exp:{s} end:{d} children:{d}\n", .{ pos.*, exp.name, entry.root.?.value.end, entry.root.?.children.items.len });
+            _ = try tree.nodeAddChildNode(node, entry.root.?);
             pos.* = entry.root.?.value.end;
             return; // Exit early, using cached result
+        } else {
+            //std.debug.print("cache miss pos:{d} exp:{s}\n", .{ pos.*, exp.name });
         }
 
         switch (exp.*.matcher) {
@@ -721,8 +722,8 @@ const Grammar = struct {
                     //std.debug.print("parse regex pos:{d} match: {s} end:{d}\n", .{ pos.*, toParse[0..result], pos.* + result });
                     const old_pos = pos.*;
                     pos.* += result;
-                    _ = try tree.nodeAddChild(node, .{ .expr = exp, .start = old_pos, .end = pos.* });
-                    try self.parseCache.put(cacheKey, try SpanTreeUnmanaged.init(&tree.nodePool, .{ .expr = exp, .start = old_pos, .end = pos.* }));
+                    const child = try tree.nodeAddChild(node, .{ .expr = exp, .start = old_pos, .end = pos.* });
+                    try self.parseCache.put(cacheKey, SpanTreeUnmanaged{ .root = child });
                 }
             },
             .literal => |l| {
@@ -749,12 +750,12 @@ const Grammar = struct {
                     if (child.children.items.len != i) {
                         // Failure, deinit, reset pos and exit
                         pos.* = child.value.start;
-                        tree.nodeDeinit(child);
                         _ = node.children.pop();
-                        break;
+                        return;
                     }
                 }
                 child.value.end = pos.*;
+                try self.parseCache.put(cacheKey, SpanTreeUnmanaged{ .root = child });
             },
             .choice => |s| {
                 //std.debug.print("parse choice name={s}\n", .{exp.name});
@@ -765,12 +766,12 @@ const Grammar = struct {
                     if (child.children.items.len > 0) {
                         // Success
                         child.value.end = pos.*;
+                        try self.parseCache.put(cacheKey, SpanTreeUnmanaged{ .root = child });
                         break;
                     }
                 } else {
                     // No matches, reset
                     pos.* = child.value.start;
-                    tree.nodeDeinit(child);
                     _ = node.children.pop();
                 }
             },
@@ -789,7 +790,6 @@ const Grammar = struct {
                         child.value.end = child.children.items[0].value.end;
                     }
                 } else {
-                    tree.nodeDeinit(child);
                     _ = node.children.pop();
                 }
             },
@@ -810,16 +810,15 @@ const Grammar = struct {
                     if (lastValue.start == lastValue.end) {
                         break;
                     }
-                    // std.debug.print("parse quantity continue\n", .{});
                 }
                 // std.debug.print("parse quantity end state l:{d} i:{d}, q.min:{d} q.max:{d}\n", .{ child.children.items.len, i, q.min, q.max });
                 if (child.children.items.len < q.min) {
-                    tree.nodeDeinit(child);
                     _ = node.children.pop();
                 } else {
                     if (child.children.items.len > 0) {
                         child.value.end = child.children.items[child.children.items.len - 1].value.end;
                     }
+                    try self.parseCache.put(cacheKey, SpanTreeUnmanaged{ .root = child });
                 }
             },
         }
@@ -928,6 +927,8 @@ pub fn main() !void {
     const elapsed_nanos = end_time.since(start_time);
     std.debug.print("Elapsed time: {d} ms\n", .{elapsed_nanos / 1_000_000});
 
+    //nodePrint(&g2, fileContents, t.root().?, 0);
+
     // std.debug.print("pos: {d} matches: {d}\n", .{ pos, g2.matchCount });
     t.deinit();
     //std.debug.print("tree count: {d} node count: {d}\n", .{ t.root.?.count(), g2.nodeCount });
@@ -977,7 +978,7 @@ fn expressionToRhs(self: *const Expression, output: *std.ArrayList(u8)) !void {
         },
         .literal => |l| {
             try output.append('"');
-            try output.appendSlice(l.value);
+            try output.appendSlice(l.value); // TODO: Escape special chars
             try output.append('"');
         },
         .reference => |r| {
@@ -1124,6 +1125,14 @@ test "expressions" {
         try std.testing.expectEqualStrings(case.o, nodeStr.items);
 
         try nodeStr.resize(0);
+    }
+}
+
+fn nodePrint(grammar: *Grammar, data: []const u8, node: *Node, i: u32) void {
+    indent(i);
+    std.debug.print("n:{s}\n", .{node.value.expr.name});
+    for (node.children.items) |c| {
+        nodePrint(grammar, data, c, i + 2);
     }
 }
 

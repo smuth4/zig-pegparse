@@ -7,7 +7,7 @@ fn indent(level: u32) void {
     }
 }
 
-// A n-ary tree of nodes, which mananges it's own memory
+// A n-ary tree of nodes, which mananges its own memory
 pub fn NaryTree(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -73,7 +73,7 @@ pub fn NaryTree(comptime T: type) type {
     };
 }
 
-// A n-ary tree of nodes, which mananges it's own memory
+// A n-ary tree of nodes, which mananges its own memory
 pub fn NaryTreeUnmanaged(comptime T: type) type {
     return struct {
         const Self = @This();

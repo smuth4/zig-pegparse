@@ -217,9 +217,10 @@ const Grammar = struct {
         self.printInner(&referenceStack, self.root, 0);
     }
 
-    fn cachePut(self: *Grammar, key: ParseCacheKey, value: SpanTreeUnmanaged) !void {
+    fn cachePut(self: *Grammar, key: ParseCacheKey, value: SpanTreeUnmanaged) void {
         if (self.parseCache) |*pc| {
-            try pc.put(key, value);
+            // It doesn't matter if this fails, it's just cache
+            pc.put(key, value) catch {};
         }
     }
 
@@ -733,7 +734,7 @@ const Grammar = struct {
                     const old_pos = pos.*;
                     pos.* += result;
                     const child = try tree.nodeAddChild(node, .{ .expr = exp, .start = old_pos, .end = pos.* });
-                    try self.cachePut(cacheKey, SpanTreeUnmanaged{ .root = child });
+                    self.cachePut(cacheKey, SpanTreeUnmanaged{ .root = child });
                 }
             },
             .literal => |l| {
@@ -765,7 +766,7 @@ const Grammar = struct {
                     }
                 }
                 child.value.end = pos.*;
-                try self.cachePut(cacheKey, SpanTreeUnmanaged{ .root = child });
+                self.cachePut(cacheKey, SpanTreeUnmanaged{ .root = child });
             },
             .choice => |s| {
                 //std.debug.print("parse choice name={s}\n", .{exp.name});
@@ -776,7 +777,7 @@ const Grammar = struct {
                     if (child.children.items.len > 0) {
                         // Success
                         child.value.end = pos.*;
-                        try self.cachePut(cacheKey, SpanTreeUnmanaged{ .root = child });
+                        self.cachePut(cacheKey, SpanTreeUnmanaged{ .root = child });
                         break;
                     }
                 } else {
@@ -828,7 +829,7 @@ const Grammar = struct {
                     if (child.children.items.len > 0) {
                         child.value.end = child.children.items[child.children.items.len - 1].value.end;
                     }
-                    try self.cachePut(cacheKey, SpanTreeUnmanaged{ .root = child });
+                    self.cachePut(cacheKey, SpanTreeUnmanaged{ .root = child });
                 }
             },
         }

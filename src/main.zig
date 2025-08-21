@@ -110,7 +110,7 @@ const Grammar = struct {
     allocator: Allocator,
     // Where parsing defaults to starting from
     root: *Expression,
-    // Holds points to expressions for reference lookups
+    // Holds pointers to expressions for reference lookups
     references: ReferenceTable,
     // Expressions can be recursive and possibly orphans, but also are
     // relatively small, hence a dedicated arena for them.
@@ -187,15 +187,10 @@ const Grammar = struct {
         return ovector[1] - ovector[0];
     }
 
-    pub fn createFactory(allocator: Allocator) Grammar {
-        var g = Grammar{
-            .root = undefined,
-            .allocator = allocator,
-            .expressionArena = std.heap.ArenaAllocator.init(allocator),
-            .references = ReferenceTable.init(allocator),
-        };
+    pub fn initFactory(allocator: Allocator) !Grammar {
+        var g = Grammar.init(allocator);
         // This immediately fills in `.root`
-        g.bootstrap();
+        _ = try g.bootstrap();
         return g;
     }
 
@@ -892,12 +887,10 @@ const Grammar = struct {
 pub fn main() !void {
     const allocator = std.heap.c_allocator;
 
-    var g = Grammar.init(allocator);
-    defer g.deinit();
+    var grammar_factory = try Grammar.initFactory(allocator);
+    defer grammar_factory.deinit();
 
-    _ = try g.bootstrap();
-    //g.print();
-    const json_grammar =
+    const json_grammar_definition =
         \\JSON = _S? ( String / Array / Object / True / False / Null / Number ) _S?
         \\Object = "{"
         \\     String ":" JSON ( "," String ":" JSON )*
@@ -924,26 +917,20 @@ pub fn main() !void {
     const fileContents = try cwd.readFileAlloc(allocator, args[1], std.math.maxInt(usize));
     defer allocator.free(fileContents);
 
-    var g2 = try g.createGrammar(json_grammar);
-    g2.disableCache();
-    defer g2.deinit();
+    var json_grammar = try grammar_factory.createGrammar(json_grammar_definition);
+    json_grammar.disableCache();
+    defer json_grammar.deinit();
 
-    g2.optimize();
+    json_grammar.optimize();
     var pos: usize = 0;
 
     const start_time = try std.time.Instant.now();
-    var t = try SpanTree.init(allocator, .{ .expr = g2.root, .start = 0, .end = 0 });
-    try g2.match(g2.root, fileContents, &pos, &t, t.root().?);
+    var t = try SpanTree.init(allocator, .{ .expr = json_grammar.root, .start = 0, .end = 0 });
+    defer t.deinit();
+    try json_grammar.match(json_grammar.root, fileContents, &pos, &t, t.root().?);
     const end_time = try std.time.Instant.now();
     const elapsed_nanos = end_time.since(start_time);
     std.debug.print("Elapsed time: {d} ms\n", .{elapsed_nanos / 1_000_000});
-
-    //nodePrint(&g2, fileContents, t.root().?, 0);
-
-    // std.debug.print("pos: {d} matches: {d}\n", .{ pos, g2.matchCount });
-    t.deinit();
-    //std.debug.print("tree count: {d} node count: {d}\n", .{ t.root.?.count(), g2.nodeCount });
-    //std.debug.print("struct size: {d}\n", .{@sizeOf(SpanTree.Node)});
 }
 
 /////////////
@@ -995,6 +982,7 @@ const TestingUtils = struct {
                 try output.appendSlice(r.target);
             },
             .sequence => |s| {
+                // TODO: Is there any way to detect if these aren't needed?
                 try output.appendSlice("( ");
                 for (s.children.items, 0..) |c, i| {
                     try expressionToRhs(c, output);

@@ -26,7 +26,7 @@ pub fn main() !void {
     const allocator = std.heap.c_allocator;
 
     // The factory here is a just a specialized grammar that can create more grammars
-    grammar_factory = pegparse.Grammar.createFactory(allocator);
+    var grammar_factory = pegparse.Grammar.initFactory(allocator);
     defer grammar_factory.deinit();
 
     // Read in the PEG definition

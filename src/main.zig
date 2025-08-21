@@ -717,8 +717,8 @@ const Grammar = struct {
             if (pc.get(cacheKey)) |entry| {
                 // If cache entry is found, we can directly return
                 //std.debug.print("cache hit pos:{d} exp:{s} end:{d} children:{d}\n", .{ pos.*, exp.name, entry.root.?.value.end, entry.root.?.children.items.len });
-                _ = try tree.nodeAddChildNode(node, entry.root.?);
-                pos.* = entry.root.?.value.end;
+                _ = try tree.nodeAddChildNode(node, entry.root);
+                pos.* = entry.root.value.end;
                 return; // Exit early, using cached result
             } else {
                 //std.debug.print("cache miss pos:{d} exp:{s}\n", .{ pos.*, exp.name });

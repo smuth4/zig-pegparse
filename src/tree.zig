@@ -29,10 +29,7 @@ pub fn NaryTree(comptime T: type) type {
         }
 
         pub fn deinit(self: *@This()) void {
-            if (self.unmanaged.root) |r| {
-                r.deinit(&self.nodePool, self.allocator);
-                self.unmanaged.root = null;
-            }
+            self.unmanaged.deinit(&self.nodePool, self.allocator);
             self.nodePool.deinit();
         }
 
@@ -80,7 +77,7 @@ pub fn NaryTree(comptime T: type) type {
 pub fn NaryTreeUnmanaged(comptime T: type) type {
     return struct {
         const Self = @This();
-        root: ?*Node = null,
+        root: *Node,
 
         const NodePool = std.heap.MemoryPool(Node);
         pub const Node = struct {
@@ -135,7 +132,7 @@ pub fn NaryTreeUnmanaged(comptime T: type) type {
 
         pub fn init(pool: *NodePool, root_value: T) !@This() {
             var tree: @This() = .{
-                .root = null,
+                .root = undefined,
             };
             tree.root = try tree.nodeInit(pool, root_value);
             return tree;
@@ -148,12 +145,8 @@ pub fn NaryTreeUnmanaged(comptime T: type) type {
             return tree;
         }
 
-        pub fn deinit(self: *@This()) void {
-            if (self.root) |r| {
-                r.deinit(&self.nodePool, self.allocator);
-                self.root = null;
-            }
-            self.nodePool.deinit();
+        pub fn deinit(self: *@This(), pool: *std.heap.MemoryPool(Node), alloc: std.mem.Allocator) void {
+            self.root.deinit(pool, alloc);
         }
 
         /// Pre-order DFS; `visitor` is a callable that accepts `*Node` and returns `!void` or `void`.

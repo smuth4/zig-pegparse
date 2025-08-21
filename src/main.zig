@@ -121,7 +121,7 @@ const Grammar = struct {
     // Global match data to be re-used for regexes
     matchData: ?*regex.pcre2_match_data_8 = null,
     // A packrat cache to avoid too much backtracking
-    parseCache: ParseCache,
+    parseCache: ?ParseCache,
 
     pub fn init(allocator: Allocator) Grammar {
         return Grammar{
@@ -205,9 +205,22 @@ const Grammar = struct {
         self.expressionArena.deinit();
     }
 
+    pub fn disableCache(self: *Grammar) void {
+        if (self.parseCache) |*pc| {
+            pc.deinit();
+        }
+        self.parseCache = null;
+    }
+
     fn print(self: *const Grammar) void {
         var referenceStack = std.ArrayList([]const u8).init(self.allocator);
         self.printInner(&referenceStack, self.root, 0);
+    }
+
+    fn cachePut(self: *Grammar, key: ParseCacheKey, value: SpanTreeUnmanaged) !void {
+        if (self.parseCache) |*pc| {
+            try pc.put(key, value);
+        }
     }
 
     fn printInner(self: *const Grammar, rs: *std.ArrayList([]const u8), e: *const Expression, i: u32) void {
@@ -265,7 +278,7 @@ const Grammar = struct {
     }
 
     const ParseOptions = struct {
-        packrat_cache: bool = true,
+        // Reserved for any future configuration.
     };
 
     // Parse pre-loaded data according to the grammar
@@ -699,15 +712,17 @@ const Grammar = struct {
             .expr = exp,
         };
 
-        // Check if we have a cached result
-        if (self.parseCache.get(cacheKey)) |entry| {
-            // If cache entry is found, we can directly return
-            //std.debug.print("cache hit pos:{d} exp:{s} end:{d} children:{d}\n", .{ pos.*, exp.name, entry.root.?.value.end, entry.root.?.children.items.len });
-            _ = try tree.nodeAddChildNode(node, entry.root.?);
-            pos.* = entry.root.?.value.end;
-            return; // Exit early, using cached result
-        } else {
-            //std.debug.print("cache miss pos:{d} exp:{s}\n", .{ pos.*, exp.name });
+        if (self.parseCache) |pc| {
+            // Check if we have a cached result
+            if (pc.get(cacheKey)) |entry| {
+                // If cache entry is found, we can directly return
+                //std.debug.print("cache hit pos:{d} exp:{s} end:{d} children:{d}\n", .{ pos.*, exp.name, entry.root.?.value.end, entry.root.?.children.items.len });
+                _ = try tree.nodeAddChildNode(node, entry.root.?);
+                pos.* = entry.root.?.value.end;
+                return; // Exit early, using cached result
+            } else {
+                //std.debug.print("cache miss pos:{d} exp:{s}\n", .{ pos.*, exp.name });
+            }
         }
 
         switch (exp.*.matcher) {
@@ -718,7 +733,7 @@ const Grammar = struct {
                     const old_pos = pos.*;
                     pos.* += result;
                     const child = try tree.nodeAddChild(node, .{ .expr = exp, .start = old_pos, .end = pos.* });
-                    try self.parseCache.put(cacheKey, SpanTreeUnmanaged{ .root = child });
+                    try self.cachePut(cacheKey, SpanTreeUnmanaged{ .root = child });
                 }
             },
             .literal => |l| {
@@ -750,7 +765,7 @@ const Grammar = struct {
                     }
                 }
                 child.value.end = pos.*;
-                try self.parseCache.put(cacheKey, SpanTreeUnmanaged{ .root = child });
+                try self.cachePut(cacheKey, SpanTreeUnmanaged{ .root = child });
             },
             .choice => |s| {
                 //std.debug.print("parse choice name={s}\n", .{exp.name});
@@ -761,7 +776,7 @@ const Grammar = struct {
                     if (child.children.items.len > 0) {
                         // Success
                         child.value.end = pos.*;
-                        try self.parseCache.put(cacheKey, SpanTreeUnmanaged{ .root = child });
+                        try self.cachePut(cacheKey, SpanTreeUnmanaged{ .root = child });
                         break;
                     }
                 } else {
@@ -813,7 +828,7 @@ const Grammar = struct {
                     if (child.children.items.len > 0) {
                         child.value.end = child.children.items[child.children.items.len - 1].value.end;
                     }
-                    try self.parseCache.put(cacheKey, SpanTreeUnmanaged{ .root = child });
+                    try self.cachePut(cacheKey, SpanTreeUnmanaged{ .root = child });
                 }
             },
         }
@@ -910,6 +925,7 @@ pub fn main() !void {
     defer allocator.free(fileContents);
 
     var g2 = try g.createGrammar(json_grammar);
+    g2.disableCache();
     defer g2.deinit();
 
     g2.optimize();

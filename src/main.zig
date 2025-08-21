@@ -934,148 +934,156 @@ pub fn main() !void {
 // Testing
 /////////////
 
-// A very minimal output format, primarily for testing
-fn nodeToString(self: *const Node, output: *std.ArrayList(u8)) !void {
-    if (self.value.expr.*.name.len > 0 and self.value.expr.*.name[0] == '_') {
-        return;
-    }
-    try output.appendSlice(self.value.expr.*.name);
-
-    if (self.children.items.len > 0) {
-        try output.append('[');
-        for (self.children.items) |c| {
-            try nodeToString(c, output);
+const TestingUtils = struct {
+    fn nodeToString(self: *const Node, output: *std.ArrayList(u8)) !void {
+        if (self.value.expr.*.name.len > 0 and self.value.expr.*.name[0] == '_') {
+            return;
         }
-        try output.append(']');
-    }
-}
+        try output.appendSlice(self.value.expr.*.name);
 
-// Utility function for expressionToRhs
-fn usizeToStr(num: usize, output: *std.ArrayList(u8)) !void {
-    var i = num;
-    if (i == 0) {
-        try output.append('0');
-    } else {
-        while (i > 0) {
-            const digit = @as(u8, @intCast(i % 10));
-            try output.append('0' + digit);
-            i /= 10;
+        if (self.children.items.len > 0) {
+            try output.append('[');
+            for (self.children.items) |c| {
+                try nodeToString(c, output);
+            }
+            try output.append(']');
         }
     }
-}
 
-fn expressionToRhs(self: *const Expression, output: *std.ArrayList(u8)) !void {
-    switch (self.*.matcher) {
-        .regex => |r| {
-            try output.appendSlice("~\"");
-            try output.appendSlice(r.value);
-            try output.append('"');
-        },
-        .literal => |l| {
-            try output.append('"');
-            try output.appendSlice(l.value); // TODO: Escape special chars
-            try output.append('"');
-        },
-        .reference => |r| {
-            try output.appendSlice(r.target);
-        },
-        .sequence => |s| {
-            try output.appendSlice("( ");
-            for (s.children.items, 0..) |c, i| {
-                try expressionToRhs(c, output);
-                if (i != s.children.items.len - 1) {
-                    try output.append(' ');
-                }
+    fn usizeToStr(num: usize, output: *std.ArrayList(u8)) !void {
+        var i = num;
+        if (i == 0) {
+            try output.append('0');
+        } else {
+            while (i > 0) {
+                const digit = @as(u8, @intCast(i % 10));
+                try output.append('0' + digit);
+                i /= 10;
             }
-            try output.appendSlice(" ) ");
-        },
-        .choice => |s| {
-            try output.appendSlice("( ");
-            for (s.children.items, 0..) |c, i| {
-                try expressionToRhs(c, output);
-                if (i != s.children.items.len - 1) {
-                    try output.appendSlice(" / ");
+        }
+    }
+
+    fn expressionToRhs(self: *const Expression, output: *std.ArrayList(u8)) !void {
+        switch (self.*.matcher) {
+            .regex => |r| {
+                try output.appendSlice("~\"");
+                try output.appendSlice(r.value);
+                try output.append('"');
+            },
+            .literal => |l| {
+                try output.append('"');
+                try output.appendSlice(l.value); // TODO: Escape special chars
+                try output.append('"');
+            },
+            .reference => |r| {
+                try output.appendSlice(r.target);
+            },
+            .sequence => |s| {
+                try output.appendSlice("( ");
+                for (s.children.items, 0..) |c, i| {
+                    try expressionToRhs(c, output);
+                    if (i != s.children.items.len - 1) {
+                        try output.append(' ');
+                    }
                 }
-            }
-            try output.appendSlice(" ) ");
-        },
-        .quantity => |q| {
-            try expressionToRhs(q.child, output);
-            if (q.min == 0 and q.max == 1) {
-                try output.append('?');
-            } else if (q.min == 0 and q.max == std.math.maxInt(usize)) {
-                try output.append('*');
-            } else if (q.min == 1 and q.max == std.math.maxInt(usize)) {
-                try output.append('+');
-            } else {
-                try output.append('{');
-                if (q.min == q.max) {
-                    try usizeToStr(q.min, output);
+                try output.appendSlice(" ) ");
+            },
+            .choice => |s| {
+                try output.appendSlice("( ");
+                for (s.children.items, 0..) |c, i| {
+                    try expressionToRhs(c, output);
+                    if (i != s.children.items.len - 1) {
+                        try output.appendSlice(" / ");
+                    }
+                }
+                try output.appendSlice(" ) ");
+            },
+            .quantity => |q| {
+                try expressionToRhs(q.child, output);
+                if (q.min == 0 and q.max == 1) {
+                    try output.append('?');
+                } else if (q.min == 0 and q.max == std.math.maxInt(usize)) {
+                    try output.append('*');
+                } else if (q.min == 1 and q.max == std.math.maxInt(usize)) {
+                    try output.append('+');
                 } else {
-                    if (q.min != 0) {
+                    try output.append('{');
+                    if (q.min == q.max) {
                         try usizeToStr(q.min, output);
+                    } else {
+                        if (q.min != 0) {
+                            try usizeToStr(q.min, output);
+                        }
+                        try output.append(',');
+                        if (q.max != std.math.maxInt(usize)) {
+                            try usizeToStr(q.max, output);
+                        }
                     }
-                    try output.append(',');
-                    if (q.max != std.math.maxInt(usize)) {
-                        try usizeToStr(q.max, output);
-                    }
+                    try output.append('}');
                 }
-                try output.append('}');
-            }
-        },
-        .lookahead => |l| {
-            if (l.negative) {
-                try output.append('!');
-            } else {
-                try output.append('&');
-            }
-            try expressionToRhs(l.child, output);
-        },
+            },
+            .lookahead => |l| {
+                if (l.negative) {
+                    try output.append('!');
+                } else {
+                    try output.append('&');
+                }
+                try expressionToRhs(l.child, output);
+            },
+        }
     }
-}
 
-// A very minimal output format, primarily for testing
-fn expressionToString(self: *const Expression, output: *std.ArrayList(u8)) !void {
-    switch (self.*.matcher) {
-        .regex => {
-            try output.appendSlice("rx");
-        },
-        .literal => {
-            try output.appendSlice("l");
-        },
-        .reference => {
-            try output.appendSlice("rf");
-        },
-        .sequence => |s| {
-            try output.appendSlice("s[");
-            for (s.children.items) |c| {
-                try expressionToString(c, output);
-            }
-            try output.append(']');
-        },
-        .choice => |s| {
-            try output.appendSlice("c[");
-            for (s.children.items) |c| {
-                try expressionToString(c, output);
-            }
-            try output.append(']');
-        },
-        .quantity => |q| {
-            try output.appendSlice("q[");
-            try expressionToString(q.child, output);
-            try output.append(']');
-        },
-        .lookahead => |l| {
-            if (l.negative) {
-                try output.appendSlice("n[");
-            } else {
-                try output.appendSlice("la[");
-            }
-            try expressionToString(l.child, output);
-            try output.append(']');
-        },
+    // A very minimal output format, primarily for testing
+    fn expressionToString(self: *const Expression, output: *std.ArrayList(u8)) !void {
+        switch (self.*.matcher) {
+            .regex => {
+                try output.appendSlice("rx");
+            },
+            .literal => {
+                try output.appendSlice("l");
+            },
+            .reference => {
+                try output.appendSlice("rf");
+            },
+            .sequence => |s| {
+                try output.appendSlice("s[");
+                for (s.children.items) |c| {
+                    try expressionToString(c, output);
+                }
+                try output.append(']');
+            },
+            .choice => |s| {
+                try output.appendSlice("c[");
+                for (s.children.items) |c| {
+                    try expressionToString(c, output);
+                }
+                try output.append(']');
+            },
+            .quantity => |q| {
+                try output.appendSlice("q[");
+                try expressionToString(q.child, output);
+                try output.append(']');
+            },
+            .lookahead => |l| {
+                if (l.negative) {
+                    try output.appendSlice("n[");
+                } else {
+                    try output.appendSlice("la[");
+                }
+                try expressionToString(l.child, output);
+                try output.append(']');
+            },
+        }
     }
-}
+
+    fn nodePrint(grammar: *Grammar, data: []const u8, node: *Node, i: u32) void {
+        indent(i);
+        std.debug.print("n:{s}\n", .{node.value.expr.name});
+        for (node.children.items) |c| {
+            nodePrint(grammar, data, c, i + 2);
+        }
+    }
+};
 
 test "expressions" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -1116,18 +1124,10 @@ test "expressions" {
 
     for (cases) |case| {
         const tree = try grammar.parseWith(case.i, case.e, .{});
-        try nodeToString(tree.root().?.children.items[0], &nodeStr);
+        try TestingUtils.nodeToString(tree.root().?.children.items[0], &nodeStr);
         try std.testing.expectEqualStrings(case.o, nodeStr.items);
 
         try nodeStr.resize(0);
-    }
-}
-
-fn nodePrint(grammar: *Grammar, data: []const u8, node: *Node, i: u32) void {
-    indent(i);
-    std.debug.print("n:{s}\n", .{node.value.expr.name});
-    for (node.children.items) |c| {
-        nodePrint(grammar, data, c, i + 2);
     }
 }
 
@@ -1171,7 +1171,7 @@ fn testExpectGrammarMatch(i: []const u8, o: []const u8) !void {
     const tree = try grammar.parse(i, .{});
     try std.testing.expectEqual(i.len, tree.root().?.children.items[0].value.end);
     const new_grammar = try grammar.createGrammar(i);
-    try expressionToString(new_grammar.root, &exprStr);
+    try TestingUtils.expressionToString(new_grammar.root, &exprStr);
     try std.testing.expectEqualStrings(o, exprStr.items);
 
     try exprStr.resize(0);
@@ -1181,7 +1181,12 @@ test "grammar - basics" {
     try testExpectGrammarMatch("a = a", "rf");
     try testExpectGrammarMatch("a = \"x\"", "l");
     try testExpectGrammarMatch("a = 'x'", "l");
+    try testExpectGrammarMatch("a = \"a\"", "l");
+    try testExpectGrammarMatch("a = 'a'", "l");
     try testExpectGrammarMatch("a = ~\"x\"", "rx");
+    try testExpectGrammarMatch("a = ~\"x\"i", "rx");
+    try testExpectGrammarMatch("a = ~\"x\"is", "rx");
+    try testExpectGrammarMatch("a = ~'x'", "rx");
 }
 
 test "grammar - lookahead" {
@@ -1189,60 +1194,30 @@ test "grammar - lookahead" {
     try testExpectGrammarMatch("a = &b", "la[rf]");
 }
 
+test "grammar - quantities" {
+    try testExpectGrammarMatch("a = \"x\"*", "q[l]");
+    try testExpectGrammarMatch("a = b*", "q[rf]");
+    try testExpectGrammarMatch("a = b+", "q[rf]");
+    try testExpectGrammarMatch("a = b?", "q[rf]");
+    try testExpectGrammarMatch("a = b{2,3}", "q[rf]");
+    try testExpectGrammarMatch("a = b{2,}", "q[rf]");
+    try testExpectGrammarMatch("a = b{,3}", "q[rf]");
+    try testExpectGrammarMatch("a = b{3}", "q[rf]");
+}
+
+test "grammar - sequences" {
+    try testExpectGrammarMatch("a = a b c", "s[rfrfrf]");
+    try testExpectGrammarMatch("a = a / b / c", "c[rfrfrf]");
+    try testExpectGrammarMatch("a = a / b / c / a", "c[rfrfrfrf]");
+    try testExpectGrammarMatch("a = ( a b c )", "s[rfrfrf]");
+
+    try testExpectGrammarMatch("a = a ( b / c )", "s[rfc[rfrf]]");
+    try testExpectGrammarMatch("a = a / b c", "c[rfs[rfrf]]");
+}
+
 test "grammar - ignore comments & whitespace" {
     try testExpectGrammarMatch("  a    =  \n   a  ", "rf");
     try testExpectGrammarMatch("a = a # comment", "rf");
-}
-
-test "grammar parsing" {
-    const cases = &[_]struct {
-        i: []const u8, // input
-        o: []const u8, // output
-    }{
-        .{ .i = "a = a # comment", .o = "rf" },
-        .{ .i = "a = \"x\"", .o = "l" },
-        .{ .i = "a = ~\"x\"", .o = "rx" },
-        .{ .i = "a = ~'x'", .o = "rx" },
-        .{ .i = "a = ~\"x\"i", .o = "rx" },
-        .{ .i = "a = ~\"x\"is", .o = "rx" },
-        .{ .i = "a = ~\"x\"i", .o = "rx" },
-        .{ .i = "a = \"a\"", .o = "l" },
-        .{ .i = "a = 'a'", .o = "l" },
-        .{ .i = "a = !b", .o = "n[rf]" },
-        .{ .i = "a = b*", .o = "q[rf]" },
-        .{ .i = "a = \"x\"*", .o = "q[l]" },
-        .{ .i = "a = b+", .o = "q[rf]" },
-        .{ .i = "a = b?", .o = "q[rf]" },
-        .{ .i = "a = b{2,3}", .o = "q[rf]" },
-        .{ .i = "a = b{2,}", .o = "q[rf]" },
-        .{ .i = "a = b{,3}", .o = "q[rf]" },
-        .{ .i = "a = b{3}", .o = "q[rf]" },
-        .{ .i = "a = a b c", .o = "s[rfrfrf]" },
-        .{ .i = "a = a / b / c", .o = "c[rfrfrf]" },
-        .{ .i = "a = ( a b c )", .o = "s[rfrfrf]" },
-
-        .{ .i = "a = a ( a / c )", .o = "s[rfc[rfrf]]" },
-        .{ .i = "a = a / b c", .o = "c[rfs[rfrf]]" },
-        .{ .i = "a = a / b / c / a", .o = "c[rfrfrfrf]" },
-    };
-
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
-    var grammar = Grammar.init(allocator);
-    _ = try grammar.bootstrap();
-
-    var exprStr = std.ArrayList(u8).init(allocator);
-    defer exprStr.deinit();
-    for (cases) |case| {
-        grammar.parseCache.clearAndFree();
-        const tree = try grammar.parse(case.i, .{});
-        try std.testing.expectEqual(case.i.len, tree.root().?.children.items[0].value.end);
-        const new_grammar = try grammar.createGrammar(case.i);
-        try expressionToString(new_grammar.root, &exprStr);
-        try std.testing.expectEqualStrings(case.o, exprStr.items);
-
-        try exprStr.resize(0);
-    }
 }
 
 test "grammar fails" {

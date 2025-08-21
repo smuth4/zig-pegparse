@@ -190,7 +190,7 @@ const Grammar = struct {
     pub fn initFactory(allocator: Allocator) !Grammar {
         var g = Grammar.init(allocator);
         // This immediately fills in `.root`
-        _ = try g.bootstrap();
+        try g.bootstrap();
         return g;
     }
 
@@ -614,7 +614,7 @@ const Grammar = struct {
         return self.initExpression(name, .{ .reference = Reference{ .target = target } });
     }
 
-    pub fn bootstrap(self: *Grammar) !*Expression {
+    pub fn bootstrap(self: *Grammar) !void {
         // Parsimonious bootstraps itself, which is fun, but manually
         // creating the grammar allows us to not have use references
         const ws = try self.createRegex("_ws", "\\s+");
@@ -694,7 +694,6 @@ const Grammar = struct {
 
         // Assign the rules to ourselves
         self.root = rules;
-        return self.root;
     }
 
     // Start matching `data` with `exp` starting from `pos`, adding children under `node` in `tree`
@@ -1167,8 +1166,7 @@ test "expression parse does not match" {
 fn testExpectGrammarMatch(i: []const u8, o: []const u8) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
-    var grammar = Grammar.init(allocator);
-    _ = try grammar.bootstrap();
+    var grammar = try Grammar.initFactory(allocator);
 
     var exprStr = std.ArrayList(u8).init(allocator);
     defer exprStr.deinit();
@@ -1233,8 +1231,7 @@ test "grammar fails" {
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
-    var grammar = Grammar.init(allocator);
-    _ = try grammar.bootstrap();
+    var grammar = try Grammar.initFactory(allocator);
 
     for (cases) |case| {
         const tree = try grammar.parse(case.i, .{});

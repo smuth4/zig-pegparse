@@ -61,6 +61,18 @@ pub fn NaryTree(comptime T: type) type {
             n.deinit(&self.nodePool, self.allocator);
             self.nodePool.destroy(n);
         }
+
+        /// Pre-order DFS; `visitor` is a callable that accepts `*Node` and returns `!void` or `void`.
+        pub fn dfs(self: *const @This(), visitor: anytype) !void {
+            if (self.root) |r| try dfsNode(r, visitor);
+        }
+
+        fn dfsNode(node: *Node, visitor: anytype) !void {
+            try visitor(node);
+            for (node.children.items) |ch| {
+                try dfsNode(ch, visitor);
+            }
+        }
     };
 }
 
@@ -148,6 +160,7 @@ pub fn NaryTreeUnmanaged(comptime T: type) type {
         pub fn dfs(self: *const @This(), visitor: anytype) !void {
             if (self.root) |r| try dfsNode(r, visitor);
         }
+
         fn dfsNode(node: *Node, visitor: anytype) !void {
             try visitor(node);
             for (node.children.items) |ch| {
@@ -191,7 +204,7 @@ pub fn NaryTreeUnmanaged(comptime T: type) type {
     };
 }
 
-test "NaryTree creation and root value" {
+test "Creation and root value" {
     const allocator = std.heap.page_allocator;
     var tree: NaryTree(u32) = try NaryTree(u32).init(allocator, 1);
 

@@ -265,21 +265,19 @@ const Grammar = struct {
         }
     }
 
+    const ParseOptions = struct {
+        packrat_cache: bool = true,
+    };
+
     // Parse pre-loaded data according to the grammar
-    pub fn parse(self: *Grammar, data: []const u8) !?SpanTree {
-        return self.parseWith(data, self.root);
+    pub fn parse(self: *Grammar, data: []const u8, options: ParseOptions) !SpanTree {
+        return self.parseWith(data, self.root, options);
     }
 
-    pub fn parseWith(self: *Grammar, data: []const u8, root: *Expression) !?SpanTree {
+    pub fn parseWith(self: *Grammar, data: []const u8, root: *Expression, _: ParseOptions) !SpanTree {
         var pos: usize = 0;
         var tree = try SpanTree.init(self.allocator, .{ .expr = root, .start = 0, .end = 0 });
         try self.match(root, data, &pos, &tree, tree.root().?);
-        if (pos != data.len) {
-            //const start = if (pos > 5) pos - 5 else pos;
-            //const end = if (pos < data.len - 6) pos + 5 else data.len - 1;
-            //std.debug.print("failed at: {s}\n", .{data[start..end]});
-            return null;
-        }
         return tree;
     }
 
@@ -293,13 +291,9 @@ const Grammar = struct {
             .referenceStack = std.ArrayList([]const u8).init(grammar.allocator),
         };
         defer visitor.visitorTable.deinit();
-        var tree = try self.parse(data);
-        defer {
-            if (tree != null) { // Can't use `if () |_|` because it doesn't detect deinit() as a modification to `var tree`
-                tree.?.deinit();
-            }
-        }
-        try visitor.visit(data, tree.?.root().?);
+        var tree = try self.parse(data, .{});
+        defer tree.deinit();
+        try visitor.visit(data, tree.root().?);
         return grammar;
     }
 
@@ -1121,7 +1115,7 @@ test "expressions" {
 
     for (cases) |case| {
         const tree = try grammar.parseWith(case.i, case.e);
-        try nodeToString(tree.?.root().?.children.items[0], &nodeStr);
+        try nodeToString(tree.root().?.children.items[0], &nodeStr);
         try std.testing.expectEqualStrings(case.o, nodeStr.items);
 
         try nodeStr.resize(0);
@@ -1174,7 +1168,7 @@ fn testExpectGrammarMatch(i: []const u8, o: []const u8) !void {
     var exprStr = std.ArrayList(u8).init(allocator);
     defer exprStr.deinit();
     const tree = try grammar.parse(i);
-    try std.testing.expectEqual(i.len, tree.?.root().?.children.items[0].value.end);
+    try std.testing.expectEqual(i.len, tree.root().?.children.items[0].value.end);
     const new_grammar = try grammar.createGrammar(i);
     try expressionToString(new_grammar.root, &exprStr);
     try std.testing.expectEqualStrings(o, exprStr.items);
@@ -1241,7 +1235,7 @@ test "grammar parsing" {
     for (cases) |case| {
         grammar.parseCache.clearAndFree();
         const tree = try grammar.parse(case.i);
-        try std.testing.expectEqual(case.i.len, tree.?.root().?.children.items[0].value.end);
+        try std.testing.expectEqual(case.i.len, tree.root().?.children.items[0].value.end);
         const new_grammar = try grammar.createGrammar(case.i);
         try expressionToString(new_grammar.root, &exprStr);
         try std.testing.expectEqualStrings(case.o, exprStr.items);
@@ -1264,7 +1258,7 @@ test "grammar fails" {
 
     for (cases) |case| {
         const tree = try grammar.parse(case.i);
-        try std.testing.expectEqual(case.i.len, tree.?.root().?.children.items[0].value.end);
+        try std.testing.expectEqual(case.i.len, tree.root().?.children.items[0].value.end);
         const result = grammar.createGrammar(case.i);
         try std.testing.expectError(GrammarParseError.InvalidRegex, result);
     }

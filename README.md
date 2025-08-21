@@ -123,6 +123,15 @@ nv.visit_generic(tree.root().?);
 | `~"\s+"i`          | Regex, with an optional flag at the end (`i` for case-insensitivity in this case). Escape sequences are passed directly to PCRE2.                    |
 | `(` `)`            | Used to group expression to ensure a certain priority, has no effect on actual parsing                                                               |
 
+## Performance
+
+While a PEG parser will never beat out a dedicated state machine or the like, it should still be pretty darn fast. Parsimonious' section on [optimizing grammars](https://github.com/erikrose/parsimonious?tab=readme-ov-file#optimizing-grammars) is very relevant to zig-pegparser's grammars as well.
+
+zig-pegparse makes use of a [packrat cache](https://en.wikipedia.org/wiki/Packrat_parser#Memoization_technique) to prevent excessive backtracking. However, there are grammars that don't do much backtracking in general, leading to both increased memory usage and adverse performance impact. In these situations, you can disable the cache:
+
+```zig
+grammar.disableCache();
+```
 
 ## Goals
 

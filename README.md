@@ -18,6 +18,7 @@ zig fetch https://github.com/smuth4/zig-pegparse/archive/<commit>.tar.gz --save-
 ## Usage
 
 ```zig
+const std = @import("std");
 const pegparse = @import("zig_pegparse");
 
 pub fn main() !void {
@@ -40,12 +41,74 @@ pub fn main() !void {
     // Parse an example string
     const data = "((bold stuff))";
     // Note that parsing the data does not create a copy of it.
-    // If the data dissappears, the nodes are still technically traverseable, but reference data in invalid memory.
+    // If the data dissappears, the nodes are still technically traverseable, but references invalid data offsets.
     var tree = grammar.parse(data);
     defer tree.deinit();
 
-    grammar.print(tree, data);
+    // A tree is always returned, even if it didn't parse everything.
+    if (tree.root().?.value.start != data.len) {
+        std.debug.print("Parsing did not complete", .{});
+    }
 }
+```
+
+Once a tree is built, there are many options for traversing it. The simplest option is the built-in iterators:
+
+```zig
+var iter = tree.iterator(.{});
+while (iter.next()) |e| {
+    if (e.exp.name == "bold_open") {
+        std.debug.print("<b>", .{});
+    } else if (e.exp.name == "bold_close") {
+        std.debug.print("</b>", .{});
+    } else if (e.exp.name == "text") {
+        const nodeData = data[e.start..e.end];
+        std.debug.print("{s}", .{nodeData});
+    } else {
+        std.debug.print("Unknown node type \"{s}\"!", .{node.value.expr.*.name});
+    }
+}
+```
+
+If you need more control, you may want to consider the visitor
+pattern. It will allow for more complicated decision making about when
+and where to descend the tree. Since zig-pegparse dogfoods it's own
+grammar logic, see `ExpressionVisitor` for a more complete example.
+
+```zig
+const NodeVisitor = struct {
+    const NodeVisitorSignature = *const fn (self: *NodeVisitor, data: []const u8, node: *const Node) void;
+
+    const visitor_table = std.static_string_map.StaticStringMap(ExpressionVisitorSignature).initComptime(.{
+        .{ "bold_open", visit_bold_open },
+        .{ "bold_close", visit_bold_close },
+        .{ "bold_text", visit_bold_text },
+    });
+
+    fn visit_generic(self: *ExpressionVisitor, data: []const u8, node: *const Node) void {
+            if (visitor_table.get(node.value.expr.*.name)) |func| {
+                func(self, data, node);
+            } else {
+                std.debug.print("Unknown node type \"{s}\"!", .{node.value.expr.*.name});
+            }
+        }
+    }
+
+    fn visit_bold_open(_: *ExpressionVisitor, _: []const u8, _: *const Node) void {
+        std.debug.print("<b>", .{});
+    }
+    fn visit_bold_close(_: *ExpressionVisitor, _: []const u8, _: *const Node) void {
+        std.debug.print("</b>", .{});
+    }
+    fn visit_bold_close(_: *ExpressionVisitor, data: []const u8, node: *const Node) void {
+        const nodeData = data[e.start..e.end];
+        std.debug.print("{s}", .{nodeData});
+    }
+}
+
+nv = NodeVisitor{};
+nv.visit_generic(tree.root().?);
+
 ```
 
 ### Grammar Refrence

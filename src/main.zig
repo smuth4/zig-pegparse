@@ -115,13 +115,12 @@ const Grammar = struct {
     // Expressions can be recursive and possibly orphans, but also are
     // relatively small, hence a dedicated arena for them.
     expressionArena: std.heap.ArenaAllocator,
-    ignorePrefix: u8 = '_',
-    // Some debugging stats
+    // A packrat cache to avoid too much backtracking
+    parseCache: ?ParseCache,
+    // A struct for the eventual error diagnostic
     diagnostic: ?ParseErrorDiagnostic = null,
     // Global match data to be re-used for regexes
     matchData: ?*regex.pcre2_match_data_8 = null,
-    // A packrat cache to avoid too much backtracking
-    parseCache: ?ParseCache,
 
     pub fn init(allocator: Allocator) Grammar {
         return Grammar{

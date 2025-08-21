@@ -56,7 +56,7 @@ pub fn NaryTree(comptime T: type) type {
         }
 
         // Note that this does not handle updating the parent to
-        // remove the now-invalid pointer
+        // remove the now-invalid pointer, use with care
         pub fn nodeDeinit(self: *@This(), n: *Node) void {
             n.deinit(&self.nodePool, self.allocator);
             self.nodePool.destroy(n);

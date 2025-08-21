@@ -120,6 +120,7 @@ const Grammar = struct {
     diagnostic: ?ParseErrorDiagnostic = null,
     // Global match data to be re-used for regexes
     matchData: ?*regex.pcre2_match_data_8 = null,
+    // A packrat cache to avoid too much backtracking
     parseCache: ParseCache,
 
     pub fn init(allocator: Allocator) Grammar {
@@ -189,14 +190,12 @@ const Grammar = struct {
 
     pub fn createFactory(allocator: Allocator) Grammar {
         var g = Grammar{
-            // This needs to be filled for parse() to actually do
-            // anything, we'll set it with a manually constructed
-            // expression for a first bootstrap
             .root = undefined,
             .allocator = allocator,
             .expressionArena = std.heap.ArenaAllocator.init(allocator),
             .references = ReferenceTable.init(allocator),
         };
+        // This immediately fills in `.root`
         g.bootstrap();
         return g;
     }
@@ -287,10 +286,8 @@ const Grammar = struct {
         var visitor = Grammar.ExpressionVisitor{
             .grammar = &grammar,
             .allocator = grammar.allocator,
-            .visitorTable = std.StringHashMap(Grammar.ExpressionVisitor.ExpressionVisitorSignature).init(grammar.allocator),
             .referenceStack = std.ArrayList([]const u8).init(grammar.allocator),
         };
-        defer visitor.visitorTable.deinit();
         var tree = try self.parse(data, .{});
         defer tree.deinit();
         try visitor.visit(data, tree.root().?);
@@ -300,27 +297,31 @@ const Grammar = struct {
     /// Converts a node tree into a full grammar
     const ExpressionVisitor = struct {
         const ExpressionVisitorSignature = *const fn (self: *ExpressionVisitor, data: []const u8, node: *const Node) anyerror!?*Expression;
-        visitorTable: std.StringHashMap(ExpressionVisitorSignature),
+
         allocator: Allocator,
         grammar: *Grammar,
         referenceStack: std.ArrayList([]const u8),
 
+        const visitor_table = std.static_string_map.StaticStringMap(ExpressionVisitorSignature).initComptime(.{
+            .{ "regex", visit_regex },
+            .{ "rule", visit_rule },
+            .{ "label_regex", visit_label_regex },
+            .{ "single_quoted_literal", visit_single_quoted_literal },
+            .{ "double_quoted_literal", visit_double_quoted_literal },
+            .{ "sequence", visit_sequence },
+            .{ "ored", visit_ored },
+            .{ "or_term", visit_or_term },
+            .{ "reference", visit_reference },
+            .{ "quantified", visit_quantified },
+        });
+
         fn visit(self: *ExpressionVisitor, data: []const u8, node: *const Node) !void {
             // Clear this grammar before re-loading any references
             self.grammar.references.clearRetainingCapacity();
-            try self.visitorTable.put("regex", &ExpressionVisitor.visit_regex);
-            try self.visitorTable.put("rule", &ExpressionVisitor.visit_rule);
-            try self.visitorTable.put("label_regex", &ExpressionVisitor.visit_label_regex);
-            try self.visitorTable.put("single_quoted_literal", &ExpressionVisitor.visit_single_quoted_literal);
-            try self.visitorTable.put("double_quoted_literal", &ExpressionVisitor.visit_double_quoted_literal);
-            try self.visitorTable.put("sequence", &ExpressionVisitor.visit_sequence);
-            try self.visitorTable.put("ored", &ExpressionVisitor.visit_ored);
-            try self.visitorTable.put("or_term", &ExpressionVisitor.visit_or_term);
-            try self.visitorTable.put("reference", &ExpressionVisitor.visit_reference);
-            try self.visitorTable.put("quantified", &ExpressionVisitor.visit_quantified);
-            //std.debug.assert(std.mem.eql(u8, node.value.name, "rules"));
+
             var rules = ExpressionList.init(self.allocator);
             defer rules.deinit();
+
             const rulesNode = node.children.items[0].children.items[1];
             for (rulesNode.children.items) |child| {
                 //std.debug.print("rule child: {s}\n", .{child.name});
@@ -351,7 +352,7 @@ const Grammar = struct {
             if (node.value.expr.*.name.len != 0 and node.value.expr.*.name[0] == '_') {
                 return null;
             }
-            if (self.visitorTable.get(node.value.expr.*.name)) |func| {
+            if (visitor_table.get(node.value.expr.*.name)) |func| {
                 return func(self, data, node);
             } else {
                 // Return the first non-null result by default
@@ -1114,7 +1115,7 @@ test "expressions" {
     defer nodeStr.deinit();
 
     for (cases) |case| {
-        const tree = try grammar.parseWith(case.i, case.e);
+        const tree = try grammar.parseWith(case.i, case.e, .{});
         try nodeToString(tree.root().?.children.items[0], &nodeStr);
         try std.testing.expectEqualStrings(case.o, nodeStr.items);
 
@@ -1154,8 +1155,8 @@ test "expression parse does not match" {
         .{ .e = try grammar.createSequence("", &[_]*Expression{ a, b }), .i = "ad" },
     };
     for (cases) |case| {
-        const tree = try grammar.parseWith(case.i, case.e);
-        try std.testing.expect(tree == null);
+        const tree = try grammar.parseWith(case.i, case.e, .{});
+        try std.testing.expect(tree.root().?.value.end != case.i.len);
     }
 }
 
@@ -1167,7 +1168,7 @@ fn testExpectGrammarMatch(i: []const u8, o: []const u8) !void {
 
     var exprStr = std.ArrayList(u8).init(allocator);
     defer exprStr.deinit();
-    const tree = try grammar.parse(i);
+    const tree = try grammar.parse(i, .{});
     try std.testing.expectEqual(i.len, tree.root().?.children.items[0].value.end);
     const new_grammar = try grammar.createGrammar(i);
     try expressionToString(new_grammar.root, &exprStr);
@@ -1234,7 +1235,7 @@ test "grammar parsing" {
     defer exprStr.deinit();
     for (cases) |case| {
         grammar.parseCache.clearAndFree();
-        const tree = try grammar.parse(case.i);
+        const tree = try grammar.parse(case.i, .{});
         try std.testing.expectEqual(case.i.len, tree.root().?.children.items[0].value.end);
         const new_grammar = try grammar.createGrammar(case.i);
         try expressionToString(new_grammar.root, &exprStr);
@@ -1257,7 +1258,7 @@ test "grammar fails" {
     _ = try grammar.bootstrap();
 
     for (cases) |case| {
-        const tree = try grammar.parse(case.i);
+        const tree = try grammar.parse(case.i, .{});
         try std.testing.expectEqual(case.i.len, tree.root().?.children.items[0].value.end);
         const result = grammar.createGrammar(case.i);
         try std.testing.expectError(GrammarParseError.InvalidRegex, result);

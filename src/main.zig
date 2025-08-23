@@ -107,6 +107,7 @@ const ParseErrorDiagnostic = struct {
         };
     }
 
+    // Create a full copy of any node that comes to us
     pub fn recordContext(self: *@This(), context: Node) void {
         for (0..stack_size) |i| {
             if (self.context_stack[i]) |_| {} else {
@@ -117,9 +118,7 @@ const ParseErrorDiagnostic = struct {
     }
 
     pub fn setMessage(self: *@This(), message: []const u8) void {
-        std.debug.assert(message.len != 0);
-        std.debug.assert(self.message.items.len == 0); // already set message, do not allow
-        self.message.appendSlice(message) catch {};
+        self.setMessageFmt(message, .{});
     }
 
     pub fn setMessageFmt(self: *@This(), comptime fmt: []const u8, args: anytype) void {
@@ -167,6 +166,8 @@ const Grammar = struct {
     // Global match data to be re-used for regexes
     matchData: ?*regex.pcre2_match_data_8 = null,
 
+    // Typically won't be used, instead call `Grammar.initFactory()` then
+    // `createGrammar` from the resulting object.
     pub fn init(allocator: Allocator) Grammar {
         return Grammar{
             // This needs to be filled for parse() to actually do
@@ -512,7 +513,7 @@ const Grammar = struct {
                     d.recordContext(node.*);
                 }
             }
-            // Send back an empty-value literal with the data as the name
+            // Send back an empty-name literal with the data as the value
             var unescaped_literal = std.ArrayList(u8).init(self.grammar.*.expressionArena.allocator());
             _ = try std.zig.string_literal.parseWrite(unescaped_literal.writer(), data[node.value.start..node.value.end]);
             return try self.grammar.createLiteral("", try unescaped_literal.toOwnedSlice());
@@ -520,7 +521,7 @@ const Grammar = struct {
 
         // TODO handle escape sequences
         fn visit_single_quoted_literal(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
-            // Send back an empty-value literal with the data as the name
+            // Send back an empty-name literal with the data as the value
             return try self.grammar.createLiteral("", data[(node.value.start + 1)..(node.value.end - 1)]);
         }
 

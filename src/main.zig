@@ -92,10 +92,55 @@ const Expression = struct {
 const ReferenceTable = std.StringHashMap(*Expression);
 const ReferenceList = std.ArrayList(*Expression);
 
+// Used to hold diagnostic information for parse errors
+// Much of this structure is stolen from https://github.com/ziglang/zig/pull/20229
 const ParseErrorDiagnostic = struct {
-    pos: usize = 0,
-    node: ?*Node = null,
-    message: []const u8 = "",
+    const stack_size: usize = 8;
+
+    // Lots of messages will contain dynamic information, use an allocator to keep it preserved
+    message: std.ArrayList(u8),
+    context_stack: [stack_size]?Node = .{null} ** stack_size,
+
+    pub fn init(allocator: Allocator) @This() {
+        return ParseErrorDiagnostic{
+            .message = std.ArrayList(u8).init(allocator),
+        };
+    }
+
+    pub fn recordContext(self: *@This(), context: Node) void {
+        for (0..stack_size) |i| {
+            if (self.context_stack[i]) |_| {} else {
+                self.context_stack[i] = context;
+                break;
+            }
+        }
+    }
+
+    pub fn setMessage(self: *@This(), message: []const u8) void {
+        std.debug.assert(message.len != 0);
+        std.debug.assert(self.message.items.len == 0); // already set message, do not allow
+        self.message.appendSlice(message) catch {};
+    }
+
+    pub fn setMessageFmt(self: *@This(), comptime fmt: []const u8, args: anytype) void {
+        std.debug.assert(fmt.len != 0);
+        std.debug.assert(self.message.items.len == 0); // already set message, do not allow
+        std.fmt.format(self.message.writer(), fmt, args) catch {};
+    }
+
+    pub fn dump(self: *const @This(), writer: anytype, data: []const u8) !void {
+        try writer.print("error: {s}\n", .{self.message.items});
+        try writer.print("stack:\n", .{});
+        for (self.context_stack, 0..) |c, i| {
+            if (c) |cs| {
+                const start = @max(0, cs.value.start);
+                const end = @min(data.len, cs.value.end);
+                try writer.print("{d} {s: <8}: {s}\n", .{ i, cs.value.expr.name, data[start..end] });
+            } else {
+                break;
+            }
+        }
+    }
 };
 
 const ParseCache = std.AutoHashMap(ParseCacheKey, SpanTreeUnmanaged);
@@ -118,7 +163,7 @@ const Grammar = struct {
     // A packrat cache to avoid too much backtracking
     parseCache: ?ParseCache,
     // A struct for the eventual error diagnostic
-    diagnostic: ?ParseErrorDiagnostic = null,
+    diagnostic: ?*ParseErrorDiagnostic = null,
     // Global match data to be re-used for regexes
     matchData: ?*regex.pcre2_match_data_8 = null,
 
@@ -143,19 +188,16 @@ const Grammar = struct {
         const patternLen: regex.PCRE2_SIZE = needle.len;
         var errornumber: c_int = undefined;
         var erroroffset: regex.PCRE2_SIZE = undefined;
+        const error_buffer_size = 512;
 
         const regexp: ?*regex.pcre2_code_8 = regex.pcre2_compile_8(pattern, patternLen, options, &errornumber, &erroroffset, null);
         if (regexp == null) {
-            if (self.diagnostic) |_| {
-                std.debug.print("re err: {d}\n", .{errornumber});
-            }
-            var errbuf: [512]u8 = undefined;
+            var errbuf: [error_buffer_size]u8 = undefined;
             const buf: *regex.PCRE2_UCHAR8 = &errbuf[0];
-            const writtenSize = regex.pcre2_get_error_message_8(errornumber, buf, 512);
-            if (self.diagnostic) |_| {
-                std.debug.print("re err: {d}\n", .{errornumber});
+            const writtenSize = regex.pcre2_get_error_message_8(errornumber, buf, error_buffer_size);
+            if (self.diagnostic) |d| {
+                d.setMessageFmt("regex compile error: {s}", .{errbuf[0..@intCast(writtenSize)]});
             }
-            std.debug.print("re errmsg: {s}\n", .{errbuf[0..@intCast(writtenSize)]});
         }
         return regexp;
     }
@@ -296,6 +338,9 @@ const Grammar = struct {
             .allocator = grammar.allocator,
             .referenceStack = std.ArrayList([]const u8).init(grammar.allocator),
         };
+        if (self.diagnostic) |d| {
+            grammar.diagnostic = d;
+        }
         var tree = try self.parse(data, .{});
         defer tree.deinit();
         try visitor.visit(data, tree.root().?);
@@ -378,6 +423,11 @@ const Grammar = struct {
         }
 
         fn visit_sequence(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
+            errdefer {
+                if (self.grammar.diagnostic) |d| {
+                    d.recordContext(node.*);
+                }
+            }
             var exprs = ExpressionList.init(self.allocator);
             defer exprs.deinit();
             if (try self.visit_generic(data, node.children.items[0])) |result| {
@@ -412,6 +462,11 @@ const Grammar = struct {
         }
 
         fn visit_ored(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
+            errdefer {
+                if (self.grammar.diagnostic) |d| {
+                    d.recordContext(node.*);
+                }
+            }
             var exprs = ExpressionList.init(self.allocator);
             defer exprs.deinit();
             // term+
@@ -439,6 +494,11 @@ const Grammar = struct {
         }
 
         fn visit_rule(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
+            errdefer {
+                if (self.grammar.diagnostic) |d| {
+                    d.recordContext(node.*);
+                }
+            }
             const labelExpr = try self.visit_generic(data, node.children.items[0]);
             const label = getLiteralValue(labelExpr.?);
             // We could descend and confirm the middle node is '=', but why bother
@@ -447,6 +507,11 @@ const Grammar = struct {
         }
 
         fn visit_double_quoted_literal(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
+            errdefer {
+                if (self.grammar.diagnostic) |d| {
+                    d.recordContext(node.*);
+                }
+            }
             // Send back an empty-value literal with the data as the name
             var unescaped_literal = std.ArrayList(u8).init(self.grammar.*.expressionArena.allocator());
             _ = try std.zig.string_literal.parseWrite(unescaped_literal.writer(), data[node.value.start..node.value.end]);
@@ -460,6 +525,11 @@ const Grammar = struct {
         }
 
         fn visit_reference(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
+            errdefer {
+                if (self.grammar.diagnostic) |d| {
+                    d.recordContext(node.*);
+                }
+            }
             // Send back an empty-value literal with the data as the name
             const ref_text = try self.visit_generic(data, node.children.items[0]);
             if (data[node.value.start] == '!') {
@@ -511,6 +581,11 @@ const Grammar = struct {
         }
 
         fn visit_regex(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
+            errdefer {
+                if (self.grammar.diagnostic) |d| {
+                    d.recordContext(node.*);
+                }
+            }
             var options: u32 = 0;
             const optionsNode = node.children.items[2];
             const re_string = node.children.items[1].children.items[0];
@@ -1234,9 +1309,12 @@ test "grammar fails" {
     var grammar = try Grammar.initFactory(allocator);
 
     for (cases) |case| {
+        var p = ParseErrorDiagnostic.init(allocator);
+        grammar.diagnostic = &p;
         const tree = try grammar.parse(case.i, .{});
         try std.testing.expectEqual(case.i.len, tree.root().?.children.items[0].value.end);
         const result = grammar.createGrammar(case.i);
         try std.testing.expectError(GrammarParseError.InvalidRegex, result);
+        try p.dump(std.io.getStdErr().writer(), case.i);
     }
 }

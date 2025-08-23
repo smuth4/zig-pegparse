@@ -123,6 +123,24 @@ nv.visit_generic(tree.root().?);
 | `~"\s+"i`          | Regex, with an optional flag at the end (`i` for case-insensitivity in this case). Escape sequences are passed directly to PCRE2.                    |
 | `(` `)`            | Used to group expression to ensure a certain priority, has no effect on actual parsing                                                               |
 
+## Error Handling
+
+By default, `parse()` may return several types of library-specific errors, e.g. if an invalid regex is supplied. This is often insufficient for troubleshooting, so zig-pegparse uses the diagnostic pattern to provide additional context:
+
+```
+var diagnostic = pegparse.ParseErrorDiagnostic.init(allocator); // Create a diagnostic object
+grammar_factory.diagnostic = &p; // Assign it to the grammar
+grammar_data = "a = ~\"[A-Z\""; // Oh no, this invalid regex won't be parsed correctly!
+if (grammar_factor.createGrammar(grammar_data)) {
+    // Success! Do whatever processing is needed
+} else {
+    // Error, print the information out to stderr
+    diagnostic.dump(std.io.getStdErr().writer(), grammar_data);
+}
+```
+
+Note that if you wish to re-use this pattern, the diagnostic object should be assigned to the visitor, not the created grammar.
+
 ## Performance
 
 While a PEG parser will never beat out a dedicated state machine or the like, it should still be pretty darn fast. Parsimonious' section on [optimizing grammars](https://github.com/erikrose/parsimonious?tab=readme-ov-file#optimizing-grammars) is very relevant to zig-pegparser's grammars as well.
@@ -132,6 +150,8 @@ zig-pegparse makes use of a [packrat cache](https://en.wikipedia.org/wiki/Packra
 ```zig
 grammar.disableCache();
 ```
+
+There is also an experimental `grammar.optimize()` functional, which currently only resolves references to be direct pointers, but may be updated with additional improvements like automatic cut operators in the future.
 
 ## Goals
 

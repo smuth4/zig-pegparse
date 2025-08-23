@@ -321,9 +321,9 @@ const Grammar = struct {
     }
 
     pub fn parseWith(self: *Grammar, data: []const u8, root: *Expression, _: ParseOptions) !SpanTree {
-        var pos: usize = 0;
         var tree = try SpanTree.init(self.allocator, .{ .expr = root, .start = 0, .end = 0 });
-        try self.match(root, data, &pos, &tree, tree.root().?);
+        var reader = std.Io.Reader.fixed(data);
+        try self.match(root, &reader, &tree, tree.root().?);
         return tree;
     }
 
@@ -749,12 +749,12 @@ const Grammar = struct {
     }
 
     // Start matching `data` with `exp` starting from `pos`, adding children under `node` in `tree`
-    pub fn match(self: *Grammar, exp: *const Expression, data: []const u8, pos: *usize, tree: *SpanTree, node: *SpanTree.Node) !void {
-        const toParse = data[pos.*..];
+    pub fn match(self: *Grammar, exp: *const Expression, reader: *std.Io.Reader, tree: *SpanTree, node: *SpanTree.Node) !void {
+        const toParse = reader.buffer[reader.seek..];
 
         // Handle the packrat caching
         const cacheKey = ParseCacheKey{
-            .position = pos.*,
+            .position = reader.seek,
             .expr = exp,
         };
 
@@ -764,7 +764,7 @@ const Grammar = struct {
                 // If cache entry is found, we can directly return
                 //std.debug.print("cache hit pos:{d} exp:{s} end:{d} children:{d}\n", .{ pos.*, exp.name, entry.root.?.value.end, entry.root.?.children.items.len });
                 _ = try tree.nodeAddChildNode(node, entry.root);
-                pos.* = entry.root.value.end;
+                reader.seek = entry.root.value.end;
                 return; // Exit early, using cached result
             } else {
                 //std.debug.print("cache miss pos:{d} exp:{s}\n", .{ pos.*, exp.name });
@@ -776,9 +776,9 @@ const Grammar = struct {
                 //std.debug.print("parse regex name={s} value={s}\n", .{ exp.name, r.value });
                 if (self.find(r.re, toParse)) |result| {
                     //std.debug.print("parse regex pos:{d} match: {s} end:{d}\n", .{ pos.*, toParse[0..result], pos.* + result });
-                    const old_pos = pos.*;
-                    pos.* += result;
-                    const child = try tree.nodeAddChild(node, .{ .expr = exp, .start = old_pos, .end = pos.* });
+                    const old_pos = reader.seek;
+                    reader.seek += result;
+                    const child = try tree.nodeAddChild(node, .{ .expr = exp, .start = old_pos, .end = reader.seek });
                     self.cachePut(cacheKey, SpanTreeUnmanaged{ .root = child });
                 }
             },
@@ -786,58 +786,58 @@ const Grammar = struct {
                 //std.debug.print("literal value={s}\n", .{l.value});
                 if (std.mem.startsWith(u8, toParse, l.value)) {
                     //std.debug.print("match literal value={s}\n", .{l.value});
-                    const old_pos = pos.*;
-                    pos.* += l.value.len;
-                    _ = try tree.nodeAddChild(node, .{ .expr = exp, .start = old_pos, .end = pos.* });
+                    const old_pos = reader.seek;
+                    reader.seek += l.value.len;
+                    _ = try tree.nodeAddChild(node, .{ .expr = exp, .start = old_pos, .end = reader.seek });
                 }
             },
             .reference => |r| {
                 //std.debug.print("parse reference target={s}\n", .{r.target});
                 if (self.references.get(r.target)) |ref| {
-                    return self.match(ref, data, pos, tree, node);
+                    return self.match(ref, reader, tree, node);
                 }
             },
             .sequence => |s| {
                 //std.debug.print("parse sequence name={s}\n", .{exp.name});
-                var child = try tree.nodeAddChild(node, .{ .expr = exp, .start = pos.*, .end = pos.* });
+                var child = try tree.nodeAddChild(node, .{ .expr = exp, .start = reader.seek, .end = reader.seek });
 
                 for (s.children.items, 1..) |c, i| {
-                    try self.match(c, data, pos, tree, child);
+                    try self.match(c, reader, tree, child);
                     if (child.children.items.len != i) {
                         // Failure, deinit, reset pos and exit
-                        pos.* = child.value.start;
+                        reader.seek = child.value.start;
                         _ = node.children.pop();
                         return;
                     }
                 }
-                child.value.end = pos.*;
+                child.value.end = reader.seek;
                 self.cachePut(cacheKey, SpanTreeUnmanaged{ .root = child });
             },
             .choice => |s| {
                 //std.debug.print("parse choice name={s}\n", .{exp.name});
-                var child = try tree.nodeAddChild(node, .{ .expr = exp, .start = pos.*, .end = pos.* });
+                var child = try tree.nodeAddChild(node, .{ .expr = exp, .start = reader.seek, .end = reader.seek });
 
                 for (s.children.items) |c| {
-                    try self.match(c, data, pos, tree, child);
+                    try self.match(c, reader, tree, child);
                     if (child.children.items.len > 0) {
                         // Success
-                        child.value.end = pos.*;
+                        child.value.end = reader.seek;
                         self.cachePut(cacheKey, SpanTreeUnmanaged{ .root = child });
                         break;
                     }
                 } else {
                     // No matches, reset
-                    pos.* = child.value.start;
+                    reader.seek = child.value.start;
                     _ = node.children.pop();
                 }
             },
             .lookahead => |l| {
                 //std.debug.print("parse lookahead name={s}\n", .{exp.name});
-                var child = try tree.nodeAddChild(node, .{ .expr = exp, .start = pos.*, .end = pos.* });
+                var child = try tree.nodeAddChild(node, .{ .expr = exp, .start = reader.seek, .end = reader.seek });
 
-                try self.match(l.child, data, pos, tree, child);
+                try self.match(l.child, reader, tree, child);
                 // Always roll back
-                pos.* = child.value.start;
+                reader.seek = child.value.start;
 
                 const found_match = (child.children.items.len == 0) == l.negative;
                 //std.debug.print("parse lookahead state l:{d} n:{s} m:{s}\n", .{ child.children.items.len, if (l.negative) "neg" else "pos", if (found_match) "yes" else "no" });
@@ -851,11 +851,11 @@ const Grammar = struct {
             },
             .quantity => |q| {
                 // std.debug.print("parse quantity name={s}\n", .{exp.name});
-                var child = try tree.nodeAddChild(node, .{ .expr = exp, .start = pos.*, .end = pos.* });
+                var child = try tree.nodeAddChild(node, .{ .expr = exp, .start = reader.seek, .end = reader.seek });
                 var i: usize = 0; //Expected count of children
-                while (child.children.items.len < q.max and pos.* < data.len) {
+                while (child.children.items.len < q.max and reader.seek < reader.buffer.len) {
                     i += 1;
-                    try self.match(q.child, data, pos, tree, child);
+                    try self.match(q.child, reader, tree, child);
                     // std.debug.print("parse quantity state l:{d} i:{d}, q.min:{d} q.max:{d}\n", .{ child.children.items.len, i, q.min, q.max });
                     // Couldn't find a next match, or exceeded the minimum
                     if (child.children.items.len != i or child.children.items.len >= q.max) {

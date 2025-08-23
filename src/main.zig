@@ -1012,35 +1012,35 @@ pub fn main() !void {
 /////////////
 
 const TestingUtils = struct {
-    fn nodeToString(self: *const Node, output: *std.array_list.Managed(u8)) !void {
+    fn nodeToString(self: *const Node, output: *std.Io.Writer) !void {
         if (self.value.expr.*.name.len > 0 and self.value.expr.*.name[0] == '_') {
             return;
         }
-        try output.appendSlice(self.value.expr.*.name);
+        try output.writeAll(self.value.expr.*.name);
 
         if (self.children.items.len > 0) {
-            try output.append('[');
+            try output.writeByte('[');
             for (self.children.items) |c| {
                 try nodeToString(c, output);
             }
-            try output.append(']');
+            try output.writeByte(']');
         }
     }
 
-    fn usizeToStr(num: usize, output: *std.array_list.Managed(u8)) !void {
+    fn usizeToStr(num: usize, output: *std.Io.Writer) !void {
         var i = num;
         if (i == 0) {
-            try output.append('0');
+            try output.writeByte('0');
         } else {
             while (i > 0) {
                 const digit = @as(u8, @intCast(i % 10));
-                try output.append('0' + digit);
+                try output.writeByte('0' + digit);
                 i /= 10;
             }
         }
     }
 
-    fn expressionToRhs(self: *const Expression, output: *std.array_list.Managed(u8)) !void {
+    fn expressionToRhs(self: *const Expression, output: *std.Io.Writer) !void {
         switch (self.*.matcher) {
             .regex => |r| {
                 try output.appendSlice("~\"");
@@ -1112,44 +1112,44 @@ const TestingUtils = struct {
     }
 
     // A very minimal output format, primarily for testing
-    fn expressionToString(self: *const Expression, output: *std.array_list.Managed(u8)) !void {
+    fn expressionToString(self: *const Expression, output: *std.Io.Writer) !void {
         switch (self.*.matcher) {
             .regex => {
-                try output.appendSlice("rx");
+                try output.writeAll("rx");
             },
             .literal => {
-                try output.appendSlice("l");
+                try output.writeAll("l");
             },
             .reference => {
-                try output.appendSlice("rf");
+                try output.writeAll("rf");
             },
             .sequence => |s| {
-                try output.appendSlice("s[");
+                try output.writeAll("s[");
                 for (s.children.items) |c| {
                     try expressionToString(c, output);
                 }
-                try output.append(']');
+                try output.writeByte(']');
             },
             .choice => |s| {
-                try output.appendSlice("c[");
+                try output.writeAll("c[");
                 for (s.children.items) |c| {
                     try expressionToString(c, output);
                 }
-                try output.append(']');
+                try output.writeByte(']');
             },
             .quantity => |q| {
-                try output.appendSlice("q[");
+                try output.writeAll("q[");
                 try expressionToString(q.child, output);
-                try output.append(']');
+                try output.writeByte(']');
             },
             .lookahead => |l| {
                 if (l.negative) {
-                    try output.appendSlice("n[");
+                    try output.writeAll("n[");
                 } else {
-                    try output.appendSlice("la[");
+                    try output.writeAll("la[");
                 }
                 try expressionToString(l.child, output);
-                try output.append(']');
+                try output.writeByte(']');
             },
         }
     }
@@ -1197,15 +1197,14 @@ test "expressions" {
         .{ .e = try grammar.createSequence("", &[_]*Expression{ a, try grammar.createLookahead("", b), b }), .i = "ab", .o = "[a[b]b]" },
     };
 
-    var nodeStr = std.array_list.Managed(u8).init(allocator);
-    defer nodeStr.deinit();
+    var outputWriter = std.Io.Writer.Allocating.init(allocator);
+    defer outputWriter.deinit();
 
     for (cases) |case| {
         const tree = try grammar.parseWith(case.i, case.e, .{});
-        try TestingUtils.nodeToString(tree.root().?.children.items[0], &nodeStr);
-        try std.testing.expectEqualStrings(case.o, nodeStr.items);
-
-        try nodeStr.resize(0);
+        try TestingUtils.nodeToString(tree.root().?.children.items[0], &outputWriter.writer);
+        try std.testing.expectEqualStrings(case.o, outputWriter.written());
+        outputWriter.shrinkRetainingCapacity(0);
     }
 }
 
@@ -1243,15 +1242,19 @@ fn testExpectGrammarMatch(i: []const u8, o: []const u8) !void {
     const allocator = gpa.allocator();
     var grammar = try Grammar.initFactory(allocator);
 
-    var exprStr = std.array_list.Managed(u8).init(allocator);
-    defer exprStr.deinit();
+    //var exprStr = std.array_list.Managed(u8).init(allocator);
+    //defer exprStr.deinit();
+
+    var outputWriter = std.Io.Writer.Allocating.init(allocator);
+    defer outputWriter.deinit();
+
     const tree = try grammar.parse(i, .{});
     try std.testing.expectEqual(i.len, tree.root().?.children.items[0].value.end);
     const new_grammar = try grammar.createGrammar(i);
-    try TestingUtils.expressionToString(new_grammar.root, &exprStr);
-    try std.testing.expectEqualStrings(o, exprStr.items);
+    try TestingUtils.expressionToString(new_grammar.root, &outputWriter.writer);
+    try std.testing.expectEqualStrings(o, outputWriter.written());
 
-    try exprStr.resize(0);
+    outputWriter.shrinkRetainingCapacity(0);
 }
 
 test "grammar - basics" {
@@ -1311,10 +1314,14 @@ test "grammar fails" {
     for (cases) |case| {
         var p = ParseErrorDiagnostic.init(allocator);
         grammar.diagnostic = &p;
+
         const tree = try grammar.parse(case.i, .{});
         try std.testing.expectEqual(case.i.len, tree.root().?.children.items[0].value.end);
+
         const result = grammar.createGrammar(case.i);
         try std.testing.expectError(GrammarParseError.InvalidRegex, result);
+
+        // TODO: Check context as opposed to just printing
         var stderr_buffer: [4096]u8 = undefined;
         var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
         const stderr = &stderr_writer.interface;

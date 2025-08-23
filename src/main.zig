@@ -336,7 +336,6 @@ const Grammar = struct {
         var visitor = Grammar.ExpressionVisitor{
             .grammar = &grammar,
             .allocator = grammar.allocator,
-            .referenceStack = std.array_list.Managed([]const u8).init(grammar.allocator),
         };
         if (self.diagnostic) |d| {
             grammar.diagnostic = d;
@@ -353,7 +352,6 @@ const Grammar = struct {
 
         allocator: Allocator,
         grammar: *Grammar,
-        referenceStack: std.array_list.Managed([]const u8),
 
         const visitor_table = std.static_string_map.StaticStringMap(ExpressionVisitorSignature).initComptime(.{
             .{ "regex", visit_regex },

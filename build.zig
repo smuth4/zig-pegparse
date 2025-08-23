@@ -112,12 +112,6 @@ pub fn build(b: *std.Build) void {
 
     exe.root_module.addOptions("tracy_config", exe_options);
 
-    const regex_dep = b.dependency("regex", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    exe.root_module.addImport("regex", regex_dep.module("regex"));
-
     const pcre2_dep = b.dependency("pcre2", .{
         .target = target,
         .optimize = optimize,

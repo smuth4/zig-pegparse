@@ -127,15 +127,23 @@ nv.visit_generic(tree.root().?);
 
 By default, `parse()` may return several types of library-specific errors, e.g. if an invalid regex is supplied. This is often insufficient for troubleshooting, so zig-pegparse uses the diagnostic pattern to provide additional context:
 
-```
+```zig
 var diagnostic = pegparse.ParseErrorDiagnostic.init(allocator); // Create a diagnostic object
 grammar_factory.diagnostic = &p; // Assign it to the grammar
 grammar_data = "a = ~\"[A-Z\""; // Oh no, this invalid regex won't be parsed correctly!
+
 if (grammar_factor.createGrammar(grammar_data)) {
     // Success! Do whatever processing is needed
-} else {
-    // Error, print the information out to stderr
-    diagnostic.dump(std.io.getStdErr().writer(), grammar_data);
+} else |err| {
+    switch (err) {
+    pegparse.Error.GrammarParseError => {
+        // Grammar error, print the information out to stderr
+        var stderr_buffer: [4096]u8 = undefined;
+        var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+        const stderr = &stderr_writer.interface;
+        diagnostic.dump(stderr, grammar_data);
+    }
+    else => { // Some other error e.g. OutOfMemory, no diagnostic will be available }
 }
 ```
 

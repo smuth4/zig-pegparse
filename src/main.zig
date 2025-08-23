@@ -24,7 +24,7 @@ const SpanTreeUnmanaged = ntree.NaryTreeUnmanaged(Span);
 const Node = SpanTree.Node;
 
 // Data structures for supported expressions
-const ExpressionList = std.array_list.Managed(*Expression);
+const ExpressionList = std.ArrayList(*Expression);
 
 // Represents a literal string
 const Literal = struct {
@@ -372,15 +372,15 @@ const Grammar = struct {
             // Clear this grammar before re-loading any references
             self.grammar.references.clearRetainingCapacity();
 
-            var rules = ExpressionList.init(self.allocator);
-            defer rules.deinit();
+            var rules = ExpressionList{};
+            defer rules.deinit(self.allocator);
 
             const rulesNode = node.children.items[0].children.items[1];
             for (rulesNode.children.items) |child| {
                 //std.debug.print("rule child: {s}\n", .{child.name});
                 if (try self.visit_generic(data, child)) |result| {
                     //self.grammar.printInner(&self.referenceStack, result, 0);
-                    try rules.append(result);
+                    try rules.append(self.allocator, result);
                 }
             }
             self.grammar.root = rules.items[0];
@@ -428,14 +428,14 @@ const Grammar = struct {
                     d.recordContext(node.*);
                 }
             }
-            var exprs = ExpressionList.init(self.allocator);
-            defer exprs.deinit();
+            var exprs = ExpressionList{};
+            defer exprs.deinit(self.allocator);
             if (try self.visit_generic(data, node.children.items[0])) |result| {
-                try exprs.append(result);
+                try exprs.append(self.allocator, result);
             }
             for (node.children.items[1].children.items) |child| {
                 if (try self.visit_generic(data, child)) |result| {
-                    try exprs.append(result);
+                    try exprs.append(self.allocator, result);
                 }
             }
             const opt_expr: ?*Expression = try self.grammar.createSequence("", exprs.items);
@@ -453,7 +453,7 @@ const Grammar = struct {
                 var seq = try self.grammar.createSequence("", &[_]*Expression{});
                 for (node.children.items[2].children.items) |child| {
                     if (try self.visit_generic(data, child)) |result| {
-                        try seq.matcher.sequence.children.append(result);
+                        try seq.matcher.sequence.children.append(self.allocator, result);
                     }
                 }
                 return seq;
@@ -467,26 +467,26 @@ const Grammar = struct {
                     d.recordContext(node.*);
                 }
             }
-            var exprs = ExpressionList.init(self.allocator);
-            defer exprs.deinit();
+            var exprs = ExpressionList{};
+            defer exprs.deinit(self.allocator);
             // term+
             if (node.children.items[0].children.items.len == 1) {
                 if (try self.visit_generic(data, node.children.items[0].children.items[0])) |result| {
-                    try exprs.append(result);
+                    try exprs.append(self.allocator, result);
                 }
             } else {
                 var seq = try self.grammar.createSequence("", &[_]*Expression{});
                 for (node.children.items[0].children.items) |child| {
                     if (try self.visit_generic(data, child)) |result| {
-                        try seq.matcher.sequence.children.append(result);
+                        try seq.matcher.sequence.children.append(self.allocator, result);
                     }
                 }
-                try exprs.append(seq);
+                try exprs.append(self.allocator, seq);
             }
             // or_term+
             for (node.children.items[1].children.items) |child| {
                 if (try self.visit_generic(data, child)) |result| {
-                    try exprs.append(result);
+                    try exprs.append(self.allocator, result);
                 }
             }
             const opt_expr: ?*Expression = try self.grammar.createChoice("", exprs.items);
@@ -647,11 +647,8 @@ const Grammar = struct {
     }
 
     fn createChoice(self: *Grammar, name: []const u8, children: []const *Expression) !*Expression {
-        var childList = ExpressionList.init(self.expressionArena.allocator());
-        try childList.ensureTotalCapacity(children.len);
-        for (children) |c| {
-            childList.appendAssumeCapacity(c);
-        }
+        var childList = ExpressionList{};
+        try childList.appendSlice(self.expressionArena.allocator(), children);
         return self.initExpression(name, .{ .choice = Choice{ .children = childList } });
     }
 
@@ -664,11 +661,8 @@ const Grammar = struct {
     }
 
     fn createSequence(self: *Grammar, name: []const u8, children: []const *Expression) !*Expression {
-        var childList = ExpressionList.init(self.expressionArena.allocator());
-        try childList.ensureTotalCapacity(children.len);
-        for (children) |c| {
-            childList.appendAssumeCapacity(c);
-        }
+        var childList = ExpressionList{};
+        try childList.appendSlice(self.expressionArena.allocator(), children);
         return self.initExpression(name, .{ .sequence = Sequence{ .children = childList } });
     }
 
@@ -1118,7 +1112,7 @@ const TestingUtils = struct {
                 try output.writeAll("rx");
             },
             .literal => {
-                try output.writeAll("l");
+                try output.writeByte('l');
             },
             .reference => {
                 try output.writeAll("rf");
@@ -1241,9 +1235,6 @@ fn testExpectGrammarMatch(i: []const u8, o: []const u8) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
     var grammar = try Grammar.initFactory(allocator);
-
-    //var exprStr = std.array_list.Managed(u8).init(allocator);
-    //defer exprStr.deinit();
 
     var outputWriter = std.Io.Writer.Allocating.init(allocator);
     defer outputWriter.deinit();

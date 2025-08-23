@@ -514,11 +514,9 @@ const Grammar = struct {
                 }
             }
             // Send back an empty-name literal with the data as the value
-            var unescaped_literal = std.array_list.Managed(u8).init(self.grammar.*.expressionArena.allocator());
-            var writer = unescaped_literal.writer();
-            var adapter = writer.adaptToNewApi(&.{});
-            _ = try std.zig.string_literal.parseWrite(&adapter.new_interface, data[node.value.start..node.value.end]);
-            return try self.grammar.createLiteral("", try unescaped_literal.toOwnedSlice());
+            var alloc_writer = std.Io.Writer.Allocating.init(self.grammar.*.expressionArena.allocator());
+            _ = try std.zig.string_literal.parseWrite(&alloc_writer.writer, data[node.value.start..node.value.end]);
+            return try self.grammar.createLiteral("", try alloc_writer.toOwnedSlice());
         }
 
         // TODO handle escape sequences

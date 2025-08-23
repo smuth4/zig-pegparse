@@ -116,11 +116,7 @@ const ParseErrorDiagnostic = struct {
         }
     }
 
-    pub fn setMessage(self: *@This(), message: []const u8) void {
-        self.setMessageFmt(message, .{});
-    }
-
-    pub fn setMessageFmt(self: *@This(), comptime fmt: []const u8, args: anytype) void {
+    pub fn setMessage(self: *@This(), comptime fmt: []const u8, args: anytype) void {
         std.debug.assert(fmt.len != 0);
         std.debug.assert(self.message.items.len == 0); // already set message, do not allow
         std.fmt.format(self.message.writer(), fmt, args) catch {};
@@ -194,7 +190,7 @@ const Grammar = struct {
             const buf: *regex.PCRE2_UCHAR8 = &errbuf[0];
             const writtenSize = regex.pcre2_get_error_message_8(errornumber, buf, error_buffer_size);
             if (self.diagnostic) |d| {
-                d.setMessageFmt("regex compile error: {s}", .{errbuf[0..@intCast(writtenSize)]});
+                d.setMessage("regex compile error: {s}", .{errbuf[0..@intCast(writtenSize)]});
             }
         }
         return regexp;

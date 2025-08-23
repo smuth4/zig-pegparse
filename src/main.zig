@@ -244,12 +244,6 @@ const Grammar = struct {
         self.parseCache = null;
     }
 
-    fn print(self: *const Grammar) void {
-        var referenceStack = std.array_list.Managed([]const u8).init(self.allocator);
-        defer referenceStack.deinit();
-        self.printInner(&referenceStack, self.root, 0);
-    }
-
     fn cachePut(self: *Grammar, key: ParseCacheKey, value: SpanTreeUnmanaged) void {
         if (self.parseCache) |*pc| {
             // It doesn't matter if this fails, it's just cache
@@ -257,7 +251,13 @@ const Grammar = struct {
         }
     }
 
-    fn printInner(self: *const Grammar, rs: *std.array_list.Managed([]const u8), e: *const Expression, i: u32) void {
+    fn print(self: *const Grammar) void {
+        var referenceStack = std.ArrayList([]const u8){};
+        defer referenceStack.deinit(self.allocator);
+        self.printInner(&referenceStack, self.root, 0);
+    }
+
+    fn printInner(self: *const Grammar, rs: *std.ArrayList([]const u8), e: *const Expression, i: u32) void {
         indent(i);
         switch (e.*.matcher) {
             .regex => |r| {
@@ -276,7 +276,7 @@ const Grammar = struct {
                             return;
                         }
                     }
-                    rs.append(r.target) catch {};
+                    rs.append(self.allocator, r.target) catch {};
                     self.printInner(rs, ref, i + 2);
                     _ = rs.pop().?;
                 } else {

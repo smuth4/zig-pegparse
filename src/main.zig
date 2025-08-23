@@ -131,9 +131,7 @@ const ParseErrorDiagnostic = struct {
         try writer.print("stack:\n", .{});
         for (self.context_stack, 0..) |c, i| {
             if (c) |cs| {
-                const start = @max(0, cs.value.start);
-                const end = @min(data.len, cs.value.end);
-                try writer.print("{d} {s: <8}: {s}\n", .{ i, cs.value.expr.name, data[start..end] });
+                try writer.print("{d} {s: <10}: {s}\n", .{ i, cs.value.expr.name, data[cs.value.start..cs.value.end] });
             } else {
                 break;
             }
@@ -250,6 +248,7 @@ const Grammar = struct {
 
     fn print(self: *const Grammar) void {
         var referenceStack = std.array_list.Managed([]const u8).init(self.allocator);
+        defer referenceStack.deinit();
         self.printInner(&referenceStack, self.root, 0);
     }
 
@@ -404,6 +403,12 @@ const Grammar = struct {
                 return null;
             }
             if (visitor_table.get(node.value.expr.*.name)) |func| {
+                // Only record context for things that get visited specifically
+                errdefer {
+                    if (self.grammar.diagnostic) |d| {
+                        d.recordContext(node.*);
+                    }
+                }
                 return func(self, data, node);
             } else {
                 // Return the first non-null result by default
@@ -421,11 +426,6 @@ const Grammar = struct {
         }
 
         fn visit_sequence(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
-            errdefer {
-                if (self.grammar.diagnostic) |d| {
-                    d.recordContext(node.*);
-                }
-            }
             var exprs = ExpressionList{};
             defer exprs.deinit(self.allocator);
             if (try self.visit_generic(data, node.children.items[0])) |result| {
@@ -460,11 +460,6 @@ const Grammar = struct {
         }
 
         fn visit_ored(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
-            errdefer {
-                if (self.grammar.diagnostic) |d| {
-                    d.recordContext(node.*);
-                }
-            }
             var exprs = ExpressionList{};
             defer exprs.deinit(self.allocator);
             // term+
@@ -492,11 +487,6 @@ const Grammar = struct {
         }
 
         fn visit_rule(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
-            errdefer {
-                if (self.grammar.diagnostic) |d| {
-                    d.recordContext(node.*);
-                }
-            }
             const labelExpr = try self.visit_generic(data, node.children.items[0]);
             const label = getLiteralValue(labelExpr.?);
             // We could descend and confirm the middle node is '=', but why bother
@@ -505,14 +495,10 @@ const Grammar = struct {
         }
 
         fn visit_double_quoted_literal(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
-            errdefer {
-                if (self.grammar.diagnostic) |d| {
-                    d.recordContext(node.*);
-                }
-            }
-            // Send back an empty-name literal with the data as the value
-            var alloc_writer = std.Io.Writer.Allocating.init(self.grammar.*.expressionArena.allocator());
+            const alloc = self.grammar.*.expressionArena.allocator();
+            var alloc_writer = std.Io.Writer.Allocating.init(alloc);
             _ = try std.zig.string_literal.parseWrite(&alloc_writer.writer, data[node.value.start..node.value.end]);
+            // Send back an empty-name literal with the data as the value
             return try self.grammar.createLiteral("", try alloc_writer.toOwnedSlice());
         }
 
@@ -523,11 +509,6 @@ const Grammar = struct {
         }
 
         fn visit_reference(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
-            errdefer {
-                if (self.grammar.diagnostic) |d| {
-                    d.recordContext(node.*);
-                }
-            }
             // Send back an empty-value literal with the data as the name
             const ref_text = try self.visit_generic(data, node.children.items[0]);
             if (data[node.value.start] == '!') {
@@ -579,11 +560,6 @@ const Grammar = struct {
         }
 
         fn visit_regex(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
-            errdefer {
-                if (self.grammar.diagnostic) |d| {
-                    d.recordContext(node.*);
-                }
-            }
             var options: u32 = 0;
             const optionsNode = node.children.items[2];
             const re_string = node.children.items[1].children.items[0];

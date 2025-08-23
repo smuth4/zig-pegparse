@@ -90,7 +90,6 @@ const Expression = struct {
 };
 
 const ReferenceTable = std.StringHashMap(*Expression);
-const ReferenceList = std.array_list.Managed(*Expression);
 
 // Used to hold diagnostic information for parse errors
 // Much of this structure is stolen from https://github.com/ziglang/zig/pull/20229

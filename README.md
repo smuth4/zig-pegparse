@@ -9,7 +9,7 @@ then use those parsers to build a abstract syntax tree.
 
 Currently zig-pegparse requires
 [pcre2](https://github.com/PCRE2Project/pcre2) for regexes, and as
-such uses the latest version of zig it allows (currently 0.14.1).
+such uses the latest version of zig it allows (currently 0.15.1).
 
 ```
 zig fetch https://github.com/smuth4/zig-pegparse/archive/<commit>.tar.gz --save-exact=zig-pegparse
@@ -156,14 +156,17 @@ There is also an experimental `grammar.optimize()` functional, which currently o
 ## Goals
 
 * Increase error handling facilities
-  * Add optional diagnostic handler for parse errors
+  * ✓ Add optional diagnostic handler for parse errors
 * Reduce memory usage
   * Allow ignoring nodes with a specific prefix
   * Add cut operator
 * Increase performance
-  * Add packrat cache - currently a little difficult since we clear
+  * ✓ Add packrat cache - currently a little difficult since we clear
     subexpressions for failed matches from the tree entirely, maybe
     keep them all then clone at the end?
+* Bring in line with 0.15.1 standards
+  * Use std.IO Readers/Writers
+  * Move ArrayLists to be unmanaged
 
 ## Limitations
 

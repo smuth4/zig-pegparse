@@ -24,7 +24,7 @@ const SpanTreeUnmanaged = ntree.NaryTreeUnmanaged(Span);
 const Node = SpanTree.Node;
 
 // Data structures for supported expressions
-const ExpressionList = std.ArrayList(*Expression);
+const ExpressionList = std.array_list.Managed(*Expression);
 
 // Represents a literal string
 const Literal = struct {
@@ -90,7 +90,7 @@ const Expression = struct {
 };
 
 const ReferenceTable = std.StringHashMap(*Expression);
-const ReferenceList = std.ArrayList(*Expression);
+const ReferenceList = std.array_list.Managed(*Expression);
 
 // Used to hold diagnostic information for parse errors
 // Much of this structure is stolen from https://github.com/ziglang/zig/pull/20229
@@ -98,12 +98,12 @@ const ParseErrorDiagnostic = struct {
     const stack_size: usize = 8;
 
     // Lots of messages will contain dynamic information, use an allocator to keep it preserved
-    message: std.ArrayList(u8),
+    message: std.array_list.Managed(u8),
     context_stack: [stack_size]?Node = .{null} ** stack_size,
 
     pub fn init(allocator: Allocator) @This() {
         return ParseErrorDiagnostic{
-            .message = std.ArrayList(u8).init(allocator),
+            .message = std.array_list.Managed(u8).init(allocator),
         };
     }
 
@@ -250,7 +250,7 @@ const Grammar = struct {
     }
 
     fn print(self: *const Grammar) void {
-        var referenceStack = std.ArrayList([]const u8).init(self.allocator);
+        var referenceStack = std.array_list.Managed([]const u8).init(self.allocator);
         self.printInner(&referenceStack, self.root, 0);
     }
 
@@ -261,7 +261,7 @@ const Grammar = struct {
         }
     }
 
-    fn printInner(self: *const Grammar, rs: *std.ArrayList([]const u8), e: *const Expression, i: u32) void {
+    fn printInner(self: *const Grammar, rs: *std.array_list.Managed([]const u8), e: *const Expression, i: u32) void {
         indent(i);
         switch (e.*.matcher) {
             .regex => |r| {
@@ -337,7 +337,7 @@ const Grammar = struct {
         var visitor = Grammar.ExpressionVisitor{
             .grammar = &grammar,
             .allocator = grammar.allocator,
-            .referenceStack = std.ArrayList([]const u8).init(grammar.allocator),
+            .referenceStack = std.array_list.Managed([]const u8).init(grammar.allocator),
         };
         if (self.diagnostic) |d| {
             grammar.diagnostic = d;
@@ -354,7 +354,7 @@ const Grammar = struct {
 
         allocator: Allocator,
         grammar: *Grammar,
-        referenceStack: std.ArrayList([]const u8),
+        referenceStack: std.array_list.Managed([]const u8),
 
         const visitor_table = std.static_string_map.StaticStringMap(ExpressionVisitorSignature).initComptime(.{
             .{ "regex", visit_regex },
@@ -514,8 +514,10 @@ const Grammar = struct {
                 }
             }
             // Send back an empty-name literal with the data as the value
-            var unescaped_literal = std.ArrayList(u8).init(self.grammar.*.expressionArena.allocator());
-            _ = try std.zig.string_literal.parseWrite(unescaped_literal.writer(), data[node.value.start..node.value.end]);
+            var unescaped_literal = std.array_list.Managed(u8).init(self.grammar.*.expressionArena.allocator());
+            var writer = unescaped_literal.writer();
+            var adapter = writer.adaptToNewApi(&.{});
+            _ = try std.zig.string_literal.parseWrite(&adapter.new_interface, data[node.value.start..node.value.end]);
             return try self.grammar.createLiteral("", try unescaped_literal.toOwnedSlice());
         }
 
@@ -1013,7 +1015,7 @@ pub fn main() !void {
 /////////////
 
 const TestingUtils = struct {
-    fn nodeToString(self: *const Node, output: *std.ArrayList(u8)) !void {
+    fn nodeToString(self: *const Node, output: *std.array_list.Managed(u8)) !void {
         if (self.value.expr.*.name.len > 0 and self.value.expr.*.name[0] == '_') {
             return;
         }
@@ -1028,7 +1030,7 @@ const TestingUtils = struct {
         }
     }
 
-    fn usizeToStr(num: usize, output: *std.ArrayList(u8)) !void {
+    fn usizeToStr(num: usize, output: *std.array_list.Managed(u8)) !void {
         var i = num;
         if (i == 0) {
             try output.append('0');
@@ -1041,7 +1043,7 @@ const TestingUtils = struct {
         }
     }
 
-    fn expressionToRhs(self: *const Expression, output: *std.ArrayList(u8)) !void {
+    fn expressionToRhs(self: *const Expression, output: *std.array_list.Managed(u8)) !void {
         switch (self.*.matcher) {
             .regex => |r| {
                 try output.appendSlice("~\"");
@@ -1113,7 +1115,7 @@ const TestingUtils = struct {
     }
 
     // A very minimal output format, primarily for testing
-    fn expressionToString(self: *const Expression, output: *std.ArrayList(u8)) !void {
+    fn expressionToString(self: *const Expression, output: *std.array_list.Managed(u8)) !void {
         switch (self.*.matcher) {
             .regex => {
                 try output.appendSlice("rx");
@@ -1198,7 +1200,7 @@ test "expressions" {
         .{ .e = try grammar.createSequence("", &[_]*Expression{ a, try grammar.createLookahead("", b), b }), .i = "ab", .o = "[a[b]b]" },
     };
 
-    var nodeStr = std.ArrayList(u8).init(allocator);
+    var nodeStr = std.array_list.Managed(u8).init(allocator);
     defer nodeStr.deinit();
 
     for (cases) |case| {
@@ -1244,7 +1246,7 @@ fn testExpectGrammarMatch(i: []const u8, o: []const u8) !void {
     const allocator = gpa.allocator();
     var grammar = try Grammar.initFactory(allocator);
 
-    var exprStr = std.ArrayList(u8).init(allocator);
+    var exprStr = std.array_list.Managed(u8).init(allocator);
     defer exprStr.deinit();
     const tree = try grammar.parse(i, .{});
     try std.testing.expectEqual(i.len, tree.root().?.children.items[0].value.end);
@@ -1316,6 +1318,10 @@ test "grammar fails" {
         try std.testing.expectEqual(case.i.len, tree.root().?.children.items[0].value.end);
         const result = grammar.createGrammar(case.i);
         try std.testing.expectError(GrammarParseError.InvalidRegex, result);
-        try p.dump(std.io.getStdErr().writer(), case.i);
+        var stderr_buffer: [4096]u8 = undefined;
+        var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+        const stderr = &stderr_writer.interface;
+        try p.dump(stderr, case.i);
+        try stderr.flush();
     }
 }

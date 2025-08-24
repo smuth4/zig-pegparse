@@ -5,11 +5,12 @@ zig-pegparse is an arbitrary-lookahead parser based on
 to rapidly build parsers from a human-readable grammar definition, and
 then use those parsers to build a abstract syntax tree.
 
+> [!WARNING]
+> zig-pegparse is a work in progress, currently being rewritten to use a full PEG virtual machine.
+
 ## Install
 
-Currently zig-pegparse requires
-[pcre2](https://github.com/PCRE2Project/pcre2) for regexes, and as
-such uses the latest version of zig it allows (currently 0.15.1).
+zig-pegparse requires the lastest release of zig (currently 0.15.1).
 
 ```
 zig fetch https://github.com/smuth4/zig-pegparse/archive/<commit>.tar.gz --save-exact=zig-pegparse
@@ -32,7 +33,6 @@ pub fn main() !void {
     // Read in the PEG definition
     var grammar = grammar_factory.createGrammar(
         \\bold_text  = bold_open text bold_close
-        \\text       = ~"[A-Z 0-9]*"i
         \\bold_open  = "(("
         \\bold_close = "))"
     );

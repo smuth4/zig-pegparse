@@ -7,10 +7,7 @@ const trace = tracy.trace;
 
 const ntree = @import("tree.zig");
 
-const regex = @cImport({
-    @cDefine("PCRE2_CODE_UNIT_WIDTH", "8");
-    @cInclude("pcre2.h");
-});
+const vm = @import("vm.zig");
 
 const Span = struct {
     start: usize,
@@ -34,12 +31,6 @@ const Literal = struct {
 // Represents a reference to a different rule
 const Reference = struct {
     target: []const u8,
-};
-
-// PCRE2 regex (with original string stored for error reporting)
-const Regex = struct {
-    value: []const u8,
-    re: *regex.pcre2_code_8,
 };
 
 // Handles ` `-separated sequences
@@ -78,7 +69,6 @@ fn indent(level: u32) void {
 
 const Expression = struct {
     pub const Matcher = union(enum) {
-        regex: Regex,
         literal: Literal,
         sequence: Sequence,
         quantity: Quantity,
@@ -158,8 +148,6 @@ const Grammar = struct {
     parseCache: ?ParseCache,
     // A struct for the eventual error diagnostic
     diagnostic: ?*ParseErrorDiagnostic = null,
-    // Global match data to be re-used for regexes
-    matchData: ?*regex.pcre2_match_data_8 = null,
 
     // Typically won't be used, instead call `Grammar.initFactory()` then
     // `createGrammar` from the resulting object.
@@ -172,58 +160,8 @@ const Grammar = struct {
             .allocator = allocator,
             .expressionArena = std.heap.ArenaAllocator.init(allocator),
             .references = ReferenceTable.init(allocator),
-            .matchData = regex.pcre2_match_data_create_8(1, null),
             .parseCache = ParseCache.init(allocator), // Initialize AutoHashMap
         };
-    }
-
-    /// Compiles a regex pattern string and returns a pattern code you can use
-    /// to match subjects. Returns `null` if something is wrong with the pattern
-    fn compile(self: *const Grammar, needle: []const u8, options: u32) ?*regex.pcre2_code_8 {
-        const pattern: regex.PCRE2_SPTR8 = needle.ptr;
-        const patternLen: regex.PCRE2_SIZE = needle.len;
-        var errornumber: c_int = undefined;
-        var erroroffset: regex.PCRE2_SIZE = undefined;
-        const error_buffer_size = 512;
-
-        const regexp: ?*regex.pcre2_code_8 = regex.pcre2_compile_8(pattern, patternLen, options, &errornumber, &erroroffset, null);
-        if (regexp == null) {
-            var errbuf: [error_buffer_size]u8 = undefined;
-            const buf: *regex.PCRE2_UCHAR8 = &errbuf[0];
-            const writtenSize = regex.pcre2_get_error_message_8(errornumber, buf, error_buffer_size);
-            if (self.diagnostic) |d| {
-                d.setMessage("regex compile error: {s}", .{errbuf[0..@intCast(writtenSize)]});
-            }
-        }
-        return regexp;
-    }
-
-    /// Takes in a compiled regexp pattern from `compile` and a string of
-    /// test which is the haystack and returns either the length of the
-    /// left-anchored match if found, or null if no match was found.
-    fn find(self: *const Grammar, regexp: *regex.pcre2_code_8, haystack: []const u8) ?usize {
-        const subject: regex.PCRE2_SPTR8 = haystack.ptr;
-        const subjLen: regex.PCRE2_SIZE = haystack.len;
-
-        // regex.PCRE2_ANCHORED prevents us from using JIT compilation, maybe it can be removed somehow?
-        const rc: c_int = regex.pcre2_match_8(regexp, subject, subjLen, 0, regex.PCRE2_ANCHORED, self.matchData, null);
-
-        if (rc < 0) {
-            return null;
-        }
-
-        if (rc == 0) {
-            // TODO: Should this trigger an actual error? It's not really a problem since we don't support submatches currently
-            //std.debug.print("ovector was not big enough for all the captured substrings\n", .{});
-            return null;
-        }
-        const ovector = regex.pcre2_get_ovector_pointer_8(self.matchData);
-
-        if (ovector[0] > ovector[1]) {
-            // TODO: Should this trigger an actual error? It's not really a problem since we don't support submatches currently
-            return null;
-        }
-        return ovector[1] - ovector[0];
     }
 
     pub fn initFactory(allocator: Allocator) !Grammar {
@@ -261,9 +199,6 @@ const Grammar = struct {
     fn printInner(self: *const Grammar, rs: *std.ArrayList([]const u8), e: *const Expression, i: u32) void {
         indent(i);
         switch (e.*.matcher) {
-            .regex => |r| {
-                std.debug.print("regex name={s} value={s}\n", .{ e.name, r.value });
-            },
             .literal => |l| {
                 std.debug.print("literal name={s} value={s}\n", .{ e.name, l.value });
             },
@@ -352,9 +287,7 @@ const Grammar = struct {
         grammar: *Grammar,
 
         const visitor_table = std.static_string_map.StaticStringMap(ExpressionVisitorSignature).initComptime(.{
-            .{ "regex", visit_regex },
             .{ "rule", visit_rule },
-            .{ "label_regex", visit_label_regex },
             .{ "single_quoted_literal", visit_single_quoted_literal },
             .{ "double_quoted_literal", visit_double_quoted_literal },
             .{ "sequence", visit_sequence },
@@ -554,40 +487,6 @@ const Grammar = struct {
                 return self.grammar.createQuantity("", min, max, child.?);
             }
         }
-
-        fn visit_label_regex(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
-            // Send back an empty-value literal with the label as the name
-            if (data[node.value.start] == '!') {
-                return try self.grammar.createNot("", try self.grammar.createLiteral("", data[node.value.start + 1 .. node.value.end]));
-            } else if (data[node.value.start] == '&') {
-                return try self.grammar.createLookahead("", try self.grammar.createLiteral("", data[node.value.start + 1 .. node.value.end]));
-            } else {
-                return try self.grammar.createLiteral("", data[node.value.start..node.value.end]);
-            }
-        }
-
-        fn visit_regex(self: *ExpressionVisitor, data: []const u8, node: *const Node) !?*Expression {
-            var options: u32 = 0;
-            const optionsNode = node.children.items[2];
-            const re_string = node.children.items[1].children.items[0];
-            const quoted_re = data[re_string.value.start + 1 .. re_string.value.end - 1];
-            for (data[optionsNode.value.start..optionsNode.value.end]) |c| {
-                options = options | switch (c) {
-                    'i' => regex.PCRE2_CASELESS,
-                    'm' => regex.PCRE2_MULTILINE,
-                    's' => regex.PCRE2_DOTALL,
-                    'u' => regex.PCRE2_UTF,
-                    'a' => regex.PCRE2_NEVER_UTF,
-                    else => 0,
-                };
-            }
-            const re = try self.grammar.createRegexOptions(
-                "",
-                quoted_re,
-                options,
-            );
-            return re;
-        }
     };
 
     /// Create an expression, storing it in the reference table if it
@@ -648,15 +547,6 @@ const Grammar = struct {
         var childList = ExpressionList{};
         try childList.appendSlice(self.expressionArena.allocator(), children);
         return self.initExpression(name, .{ .sequence = Sequence{ .children = childList } });
-    }
-
-    fn createRegex(self: *Grammar, name: []const u8, value: []const u8) !*Expression {
-        return self.createRegexOptions(name, value, 0);
-    }
-
-    fn createRegexOptions(self: *Grammar, name: []const u8, value: []const u8, options: u32) !*Expression {
-        const re = self.compile(value, options) orelse return GrammarParseError.ParseError;
-        return self.initExpression(name, .{ .regex = Regex{ .value = value, .re = re } });
     }
 
     fn createLiteral(self: *Grammar, name: []const u8, value: []const u8) !*Expression {
@@ -773,16 +663,6 @@ const Grammar = struct {
         }
 
         switch (exp.*.matcher) {
-            .regex => |r| {
-                //std.debug.print("parse regex name={s} value={s}\n", .{ exp.name, r.value });
-                if (self.find(r.re, toParse)) |result| {
-                    //std.debug.print("parse regex pos:{d} match: {s} end:{d}\n", .{ pos.*, toParse[0..result], pos.* + result });
-                    const old_pos = reader.seek;
-                    reader.seek += result;
-                    const child = try tree.nodeAddChild(node, .{ .expr = exp, .start = old_pos, .end = reader.seek });
-                    self.cachePut(cacheKey, SpanTreeUnmanaged{ .root = child });
-                }
-            },
             .literal => |l| {
                 //std.debug.print("literal value={s}\n", .{l.value});
                 if (std.mem.startsWith(u8, toParse, l.value)) {
@@ -1092,9 +972,6 @@ const TestingUtils = struct {
     // A very minimal output format, primarily for testing
     fn expressionToString(self: *const Expression, output: *std.Io.Writer) !void {
         switch (self.*.matcher) {
-            .regex => {
-                try output.writeAll("rx");
-            },
             .literal => {
                 try output.writeByte('l');
             },
@@ -1156,9 +1033,6 @@ test "expressions" {
     }{
         .{ .e = try grammar.createLiteral("", "="), .i = "=", .o = "" },
         .{ .e = try grammar.createLiteral("", "test"), .i = "test", .o = "" },
-        .{ .e = try grammar.createRegex("", "test"), .i = "test", .o = "" },
-        .{ .e = try grammar.createRegex("", "\\s+"), .i = "     ", .o = "" },
-        .{ .e = try grammar.createRegex("", "\\s*"), .i = "", .o = "" },
         .{ .e = try grammar.createOneOrMore("", a), .i = "a", .o = "[a]" },
         .{ .e = try grammar.createOneOrMore("", a), .i = "aaa", .o = "[aaa]" },
         .{ .e = try grammar.createZeroOrMore("", a), .i = "", .o = "" }, // Matched but no children, maybe a separate test?
@@ -1202,8 +1076,6 @@ test "expression parse does not match" {
         .{ .e = try grammar.createLiteral("", "test"), .i = "test2" },
         .{ .e = try grammar.createLiteral("", "test"), .i = "tes" },
         .{ .e = try grammar.createLiteral("", "\\n"), .i = "\t" },
-        .{ .e = try grammar.createRegex("", "test"), .i = "tes" },
-        .{ .e = try grammar.createRegex("", "\\s+"), .i = "test" },
         .{ .e = try grammar.createZeroOrOne("", a), .i = "aaa" },
         .{ .e = try grammar.createOneOrMore("", c), .i = "!!!" },
         .{ .e = try grammar.createChoice("", &[_]*Expression{ a, b, c }), .i = "d" },
@@ -1279,7 +1151,6 @@ test "grammar fails" {
     const cases = &[_]struct {
         i: []const u8, // input
     }{
-        .{ .i = "a = ~\"[A-Z\"" }, // invalid regex
         .{ .i = "a = \"\\xGG\"" }, // invalid escape sequence
         .{ .i = "a = \"x\"\na = \"y\"" }, // duplicate label
     };

@@ -25,18 +25,12 @@
     .fingerprint = 0x743928ac5510549e, // Changing this has security and trust implications.
     // Tracks the earliest Zig version that the package considers to be a
     // supported use case.
-    .minimum_zig_version = "0.15.0-dev.1283+1fcaf90dd",
+    .minimum_zig_version = "0.15.1",
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
     // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
-    .dependencies = .{
-        .pcre2 = .{
-            .url = "https://github.com/PCRE2Project/pcre2/archive/7c7a27442279f5b53cd9c1c320e7a5fa662b48e7.tar.gz",
-            .hash = "N-V-__8AAPaj4AA7tqCGizncMhl8gm8AX1wmXFaB7jH2tJoq",
-        },
-    },
     .paths = .{
         "build.zig",
         "build.zig.zon",

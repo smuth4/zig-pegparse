@@ -213,13 +213,14 @@ const Grammar = struct {
         }
 
         if (rc == 0) {
-            std.debug.print("ovector was not big enough for all the captured substrings\n", .{});
+            // TODO: Should this trigger an actual error? It's not really a problem since we don't support submatches currently
+            //std.debug.print("ovector was not big enough for all the captured substrings\n", .{});
             return null;
         }
         const ovector = regex.pcre2_get_ovector_pointer_8(self.matchData);
 
         if (ovector[0] > ovector[1]) {
-            std.debug.print("error with ovector\n", .{});
+            // TODO: Should this trigger an actual error? It's not really a problem since we don't support submatches currently
             return null;
         }
         return ovector[1] - ovector[0];
@@ -973,12 +974,12 @@ pub fn main() !void {
     defer json_grammar.deinit();
 
     json_grammar.optimize();
-    var pos: usize = 0;
 
     const start_time = try std.time.Instant.now();
     var t = try SpanTree.init(allocator, .{ .expr = json_grammar.root, .start = 0, .end = 0 });
     defer t.deinit();
-    try json_grammar.match(json_grammar.root, fileContents, &pos, &t, t.root().?);
+    var reader = std.Io.Reader.fixed(fileContents);
+    try json_grammar.match(json_grammar.root, &reader, &t, t.root().?);
     const end_time = try std.time.Instant.now();
     const elapsed_nanos = end_time.since(start_time);
     std.debug.print("Elapsed time: {d} ms\n", .{elapsed_nanos / 1_000_000});
